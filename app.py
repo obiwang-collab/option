@@ -9,6 +9,7 @@ from io import StringIO
 import matplotlib.font_manager as fm
 import os
 import time
+import random
 
 # --- 1. 網頁設定 ---
 st.set_page_config(
@@ -57,69 +58,81 @@ def get_settlement_date(contract_code):
     except:
         return "9999/99/99"
 
-def get_realtime_taiex():
-    """
-    終極版：使用 Yahoo Chart API 抓取【1分鐘線圖】的【最後一筆數據】
-    解決了 Meta Data 延遲的問題，也避開了 Quote API 被擋的問題
-    """
-    ts = int(time.time())
-    # 關鍵：interval=1m (每分鐘資料), range=1d, includePrePost=false
-    url = f"https://query1.finance.yahoo.com/v8/finance/chart/%5ETWII?interval=1m&range=1d&includePrePost=false&_={ts}"
-    
-    headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-    }
+def fetch_from_twse():
+    """嘗試從證交所 MIS 抓取 (最即時，但容易擋雲端 IP)"""
+    ts = int(time.time() * 1000)
+    url = f"https://mis.twse.com.tw/stock/api/getStockInfo.jsp?ex_ch=tse_t00.tw&json=1&delay=0&_={ts}"
+    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'}
     
     try:
-        res = requests.get(url, headers=headers, timeout=5)
+        res = requests.get(url, headers=headers, timeout=3)
         data = res.json()
-        
+        if 'msgArray' in data and len(data['msgArray']) > 0:
+            info = data['msgArray'][0]
+            current = info.get('z', '-')
+            yesterday = info.get('y', '-')
+            time_str = info.get('t', '') # 證交所給的時間 HH:MM:SS
+            
+            if current == '-' or current == '': current = info.get('o', yesterday)
+            
+            cur_val = float(current)
+            y_val = float(yesterday)
+            
+            # 組合日期時間
+            now_dt = datetime.now(tz=TW_TZ)
+            full_time_str = f"{now_dt.strftime('%Y-%m-%d')} {time_str}"
+            
+            return cur_val, cur_val - y_val, (cur_val - y_val)/y_val * 100, full_time_str, "TWSE (即時)"
+    except:
+        pass
+    return None
+
+def fetch_from_yahoo():
+    """嘗試從 Yahoo Chart API 抓取 (穩定但可能延遲 20 分鐘)"""
+    ts = int(time.time())
+    url = f"https://query1.finance.yahoo.com/v8/finance/chart/%5ETWII?interval=1m&range=1d&includePrePost=false&_={ts}"
+    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'}
+    
+    try:
+        res = requests.get(url, headers=headers, timeout=4)
+        data = res.json()
         if 'chart' in data and 'result' in data['chart']:
             result = data['chart']['result'][0]
             meta = result['meta']
             
-            # 1. 嘗試直接從最後一筆 tick 拿資料 (最準確)
-            if 'timestamp' in result and 'indicators' in result:
-                timestamps = result['timestamp']
-                quotes = result['indicators']['quote'][0]
-                
-                if timestamps and quotes and 'close' in quotes:
-                    # 找到最後一個非 None 的收盤價
-                    closes = quotes['close']
-                    valid_idx = -1
-                    for i in range(len(closes)-1, -1, -1):
-                        if closes[i] is not None:
-                            valid_idx = i
-                            break
-                    
-                    if valid_idx != -1:
-                        current_price = closes[valid_idx]
-                        last_time = timestamps[valid_idx]
-                        prev_close = meta.get('chartPreviousClose')
-                        
-                        time_str = datetime.fromtimestamp(last_time, tz=TW_TZ).strftime('%Y-%m-%d %H:%M:%S')
-                        
-                        if prev_close:
-                            diff = current_price - prev_close
-                            percent = (diff / prev_close) * 100
-                            return current_price, diff, percent, time_str
-
-            # 2. 如果上面失敗，降級使用 meta 資料 (雖然可能有延遲，總比沒有好)
+            # 優先使用 meta 裡的價格，通常比 candlestick 新
             current = meta.get('regularMarketPrice')
             prev = meta.get('chartPreviousClose')
             timestamp = meta.get('regularMarketTime')
             
-            time_str = datetime.now(tz=TW_TZ).strftime('%Y-%m-%d %H:%M:%S')
-            if timestamp:
-                time_str = datetime.fromtimestamp(timestamp, tz=TW_TZ).strftime('%Y-%m-%d %H:%M:%S')
+            # 如果 timestamp 太舊 (>20分)，標記延遲
+            time_dt = datetime.fromtimestamp(timestamp, tz=TW_TZ) if timestamp else datetime.now(tz=TW_TZ)
+            time_str = time_dt.strftime('%Y-%m-%d %H:%M:%S')
+            
+            # 檢查延遲
+            is_delayed = (datetime.now(tz=TW_TZ) - time_dt).total_seconds() > 900 # 15分鐘
+            source_name = "Yahoo (延遲)" if is_delayed else "Yahoo (即時)"
 
             if current and prev:
-                return current, current - prev, (current - prev)/prev * 100, time_str
-
-    except Exception as e:
+                return current, current - prev, (current - prev)/prev * 100, time_str, source_name
+    except:
         pass
-        
-    return None, None, None, datetime.now(tz=TW_TZ).strftime('%Y-%m-%d %H:%M:%S')
+    return None
+
+def get_realtime_taiex():
+    """
+    雙引擎抓取：優先 TWSE -> 失敗轉 Yahoo
+    """
+    # 1. 第一順位：證交所
+    result = fetch_from_twse()
+    if result: return result
+    
+    # 2. 第二順位：Yahoo
+    result = fetch_from_yahoo()
+    if result: return result
+    
+    # 3. 都失敗
+    return None, None, None, datetime.now(tz=TW_TZ).strftime('%Y-%m-%d %H:%M:%S'), "無訊號"
 
 @st.cache_data(ttl=300) 
 def get_option_data():
@@ -160,7 +173,7 @@ def get_option_data():
             continue 
     return None, None
 
-# --- 3. 主程式邏輯 (使用 st.fragment + JS 倒數) ---
+# --- 3. 主程式邏輯 ---
 
 st.title("📊 台指期選擇權(TXO) 支撐壓力戰情室")
 
@@ -171,12 +184,12 @@ with st.sidebar:
         st.cache_data.clear()
         st.rerun()
 
-# 核心邏輯：如果勾選自動刷新，後端每 60 秒重跑一次
 @st.fragment(run_every=60 if auto_refresh else None)
 def dashboard_content():
     # 1. 抓資料
     df, data_date = get_option_data()
-    taiex_now, taiex_diff, taiex_pct, taiex_time = get_realtime_taiex()
+    # 這裡會回傳 5 個值：現價, 漲跌, %, 時間, 來源名稱
+    taiex_now, taiex_diff, taiex_pct, taiex_time, source_name = get_realtime_taiex()
 
     # 2. 顯示指標
     if taiex_now is not None:
@@ -184,14 +197,16 @@ def dashboard_content():
         with c1:
             st.metric("加權指數 (TAIEX)", f"{taiex_now:,.2f}", f"{taiex_diff:+.2f} ({taiex_pct:+.2f}%)")
         with c2:
-            st.caption(f"即時報價：{taiex_time} (TW)")
+            # 根據來源顯示不同顏色
+            color = "green" if "TWSE" in source_name else "orange"
+            st.markdown(f"**報價時間**: {taiex_time}")
+            st.markdown(f"**資料來源**: :{color}[{source_name}]")
         with c3:
             st.caption(f"盤後籌碼：{data_date}")
-            
-            # === JavaScript 動態倒數計時 ===
             if auto_refresh:
+                # JS 倒數
                 countdown_html = """
-                <div id="countdown-timer" style="font-size: 0.8em; color: rgba(49, 51, 63, 0.6); margin-top: -10px;">
+                <div id="countdown-timer" style="font-size: 0.8em; color: rgba(49, 51, 63, 0.6); margin-top: -5px;">
                     ⚡ 刷新倒數: <span id="time-left">60</span>s
                 </div>
                 <script>
@@ -227,7 +242,7 @@ def dashboard_content():
     
     for month in all_months:
         s_date = get_settlement_date(month)
-        if s_date <= data_date: continue # 過濾已結算
+        if s_date <= data_date: continue 
         
         df_m = df[df['Month'] == month]
         is_call = df_m['Type'].astype(str).str.upper().str.contains('買權|CALL')
@@ -252,7 +267,6 @@ def dashboard_content():
 
     plt.style.use('seaborn-v0_8-white')
     
-    # 字體設定
     font_path = 'msjh.ttc'
     prop = fm.FontProperties(fname=font_path) if os.path.exists(font_path) else None
     if prop:
@@ -263,7 +277,12 @@ def dashboard_content():
 
     # 標題
     title_str = f"TXO 籌碼分佈 vs 大盤：{int(taiex_now)}" if taiex_now else "TXO 籌碼分佈"
-    time_info = f"[更新：{taiex_time} (TW)]" if taiex_now else f"[日期：{data_date}]"
+    
+    # 標題加上來源標記
+    if source_name and "延遲" in source_name:
+        time_info = f"[更新：{taiex_time} (延遲)]"
+    else:
+        time_info = f"[更新：{taiex_time}]" if taiex_now else f"[日期：{data_date}]"
     
     fig.suptitle(f"{title_str}    {time_info}", fontsize=20, fontweight='bold', y=0.96, color='#333333', fontproperties=prop if prop else None)
 
@@ -282,11 +301,9 @@ def dashboard_content():
         ax.bar(strikes + bw/2, c_oi, width=bw, color='#d62728', alpha=0.85, label='Call (壓力)')
         ax.bar(strikes - bw/2, p_oi, width=bw, color='#2ca02c', alpha=0.85, label='Put (支撐)')
         
-        # 大盤虛線
         if taiex_now:
             ax.axvline(x=taiex_now, color='#ff9900', linestyle='--', linewidth=2, label=f'大盤 ({int(taiex_now)})')
 
-        # 子標題
         t_text = f"合約：{m_code}  [預估結算：{s_date}]"
         ax.set_title(t_text, fontsize=14, fontweight='bold', loc='left', pad=12, color='#003366', fontproperties=prop if prop else None)
         
@@ -297,7 +314,6 @@ def dashboard_content():
         for s in ['top', 'right', 'left']: ax.spines[s].set_visible(False)
         ax.tick_params(axis='y', length=0)
 
-        # 標註最大量
         ax.text(strikes[np.argmax(c_oi)] + bw/2, np.max(c_oi) + 50, f'{int(np.max(c_oi))}', 
                 ha='center', va='bottom', color='#d62728', fontweight='bold', fontsize=11)
         ax.text(strikes[np.argmax(p_oi)] - bw/2, np.max(p_oi) + 50, f'{int(np.max(p_oi))}', 
