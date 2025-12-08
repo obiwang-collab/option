@@ -4,7 +4,7 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import numpy as np
 import calendar
-from datetime import datetime
+from datetime import datetime, timedelta  # 修改1: 增加 timedelta 模組
 from io import StringIO
 import matplotlib.font_manager as fm
 import os
@@ -56,35 +56,58 @@ def get_settlement_date(contract_code):
 @st.cache_data(ttl=60) 
 def get_option_data():
     url = "https://www.taifex.com.tw/cht/3/optDailyMarketReport"
-    today = datetime.now().strftime('%Y/%m/%d')
     
-    payload = {
-        'queryType': '2', 'marketCode': '0', 'dateaddcnt': '',
-        'commodity_id': 'TXO', 'commodity_id2': '', 'queryDate': today,
-        'MarketCode': '0', 'commodity_idt': 'TXO'
+    # 修改2: 增加 User-Agent 避免被擋，並加入回溯迴圈
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
     }
 
-    try:
-        res = requests.post(url, data=payload, timeout=10)
-        dfs = pd.read_html(StringIO(res.text))
-        if not dfs: return None
-        df = dfs[0]
+    # 嘗試往回找 5 天 (涵蓋週末與國定假日)
+    for i in range(5):
+        query_date = (datetime.now() - timedelta(days=i)).strftime('%Y/%m/%d')
         
-        df.columns = [str(c).replace(' ', '').replace('*', '') for c in df.columns]
-        required_cols = ['到期月份(週別)', '履約價', '買賣權', '未沖銷契約量']
-        if not all(col in df.columns for col in required_cols): return None
+        payload = {
+            'queryType': '2', 'marketCode': '0', 'dateaddcnt': '',
+            'commodity_id': 'TXO', 'commodity_id2': '', 
+            'queryDate': query_date, # 使用動態日期
+            'MarketCode': '0', 'commodity_idt': 'TXO'
+        }
 
-        df = df[required_cols].copy()
-        df.columns = ['Month', 'Strike', 'Type', 'OI']
-        df = df[pd.to_numeric(df['Strike'], errors='coerce').notnull()]
-        df['Strike'] = df['Strike'].astype(float)
-        df['OI'] = pd.to_numeric(df['OI'], errors='coerce').fillna(0)
-        return df
-    except Exception as e:
-        st.error(f"資料抓取失敗: {e}")
-        return None
+        try:
+            res = requests.post(url, data=payload, headers=headers, timeout=10)
+            
+            # 如果回傳內容太短或包含查無資料，就跳過，找前一天
+            if len(res.text) < 500 or "查無資料" in res.text:
+                continue
 
-# --- 3. 主程式邏輯 ---
+            dfs = pd.read_html(StringIO(res.text))
+            if not dfs: continue # 沒表格，找前一天
+            
+            df = dfs[0]
+            
+            df.columns = [str(c).replace(' ', '').replace('*', '') for c in df.columns]
+            required_cols = ['到期月份(週別)', '履約價', '買賣權', '未沖銷契約量']
+            
+            # 欄位不對，找前一天
+            if not all(col in df.columns for col in required_cols): continue
+
+            # --- 成功抓到資料 ---
+            st.toast(f"已載入 {query_date} 的盤後資料", icon="📅") # 提示使用者目前顯示的日期
+            
+            df = df[required_cols].copy()
+            df.columns = ['Month', 'Strike', 'Type', 'OI']
+            df = df[pd.to_numeric(df['Strike'], errors='coerce').notnull()]
+            df['Strike'] = df['Strike'].astype(float)
+            df['OI'] = pd.to_numeric(df['OI'], errors='coerce').fillna(0)
+            return df
+            
+        except Exception as e:
+            continue # 發生錯誤，找前一天
+
+    st.error("最近 5 天皆無法獲取期交所資料，請檢查連線。")
+    return None
+
+# --- 3. 主程式邏輯 (以下完全未改動) ---
 
 st.title("📊 台指期選擇權(TXO) 支撐壓力戰情室")
 
