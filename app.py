@@ -121,26 +121,23 @@ def get_option_data():
             continue 
     return None, None
 
-# --- 3. 主程式邏輯 (使用 st.fragment 實現局部自動刷新) ---
+# --- 3. 主程式邏輯 (使用 st.fragment + JS 倒數) ---
 
 st.title("📊 台指期選擇權(TXO) 支撐壓力戰情室")
 
 with st.sidebar:
     st.write("### 設定")
+    # 預設開啟自動刷新，頻率 60 秒
     auto_refresh = st.checkbox('開啟 60秒 自動刷新', value=True)
     if st.button("🔄 手動刷新", type="primary"):
         st.cache_data.clear()
         st.rerun()
 
-# 核心邏輯：如果勾選自動刷新，每 60 秒重跑一次這個函式
-# run_every 會自動計時，只有這個函式範圍內會重跑
+# 核心邏輯：如果勾選自動刷新，後端每 60 秒重跑一次
 @st.fragment(run_every=60 if auto_refresh else None)
 def dashboard_content():
     # 1. 抓資料
-    # get_option_data 有 cache，不會頻繁請求期交所 (安全)
     df, data_date = get_option_data()
-    
-    # get_realtime_taiex 沒 cache，每次刷新都會去 Yahoo 抓最新報價 (輕量)
     taiex_now, taiex_diff, taiex_pct, taiex_time = get_realtime_taiex()
 
     # 2. 顯示指標
@@ -152,8 +149,37 @@ def dashboard_content():
             st.caption(f"即時報價：{taiex_time} (TW)")
         with c3:
             st.caption(f"盤後籌碼：{data_date}")
+            
+            # === 加入 JavaScript 動態倒數計時 ===
             if auto_refresh:
-                st.caption("⚡ 自動刷新中 (60s)")
+                # 這段 JS 會在瀏覽器端執行，不消耗後端資源
+                # 每次 Python 重跑這個 fragment 時，HTML 會重繪，JS 計時器也會重置為 60
+                countdown_html = """
+                <div id="countdown-timer" style="font-size: 0.8em; color: rgba(49, 51, 63, 0.6); margin-top: -10px;">
+                    ⚡ 刷新倒數: <span id="time-left">60</span>s
+                </div>
+                <script>
+                    // 清除可能存在的舊 interval (避免 fragment 重複執行時疊加)
+                    if (window.countdownInterval) clearInterval(window.countdownInterval);
+                    
+                    var timeLeft = 60;
+                    var elem = document.getElementById('time-left');
+                    
+                    window.countdownInterval = setInterval(function() {
+                        if (timeLeft <= 1) {
+                            elem.innerHTML = "更新中...";
+                            clearInterval(window.countdownInterval);
+                        } else {
+                            timeLeft--;
+                            elem.innerHTML = timeLeft;
+                        }
+                    }, 1000);
+                </script>
+                """
+                st.components.v1.html(countdown_html, height=30)
+            else:
+                st.caption("⏸️ 自動刷新已暫停")
+
         st.divider() 
     else:
         st.warning("⚠️ 無法獲取即時大盤，僅顯示盤後籌碼。")
@@ -204,7 +230,7 @@ def dashboard_content():
 
     # 標題
     title_str = f"TXO 籌碼分佈 vs 大盤：{int(taiex_now)}" if taiex_now else "TXO 籌碼分佈"
-    time_info = f"[更新：{taiex_time}]" if taiex_now else f"[日期：{data_date}]"
+    time_info = f"[更新：{taiex_time} (TW)]" if taiex_now else f"[日期：{data_date}]"
     
     fig.suptitle(f"{title_str}    {time_info}", fontsize=20, fontweight='bold', y=0.96, color='#333333', fontproperties=prop if prop else None)
 
@@ -253,5 +279,4 @@ def dashboard_content():
     st.pyplot(fig, use_container_width=True)
 
 # --- 執行主要區塊 ---
-# 呼叫這個被 @st.fragment 裝飾的函式，它就會自己動起來
 dashboard_content()
