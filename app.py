@@ -278,4 +278,90 @@ def main():
     # --- 關鍵修正：確保這裡下載的是「完整原始 df」 ---
     # 此時的 df 包含所有履約價、所有月份，完全沒有被裁切
     # 我還多加入了 Volume (成交量) 欄位
-    csv = df.to_csv(index=False).encode('utf-8-
+    csv = df.to_csv(index=False).encode('utf-8-sig')
+    
+    st.sidebar.markdown("---")
+    st.sidebar.markdown("### 📥 數據導出")
+    st.sidebar.info("CSV 包含所有履約價與月份的完整原始資料，未經裁切。")
+    st.sidebar.download_button(
+        label="下載完整籌碼 CSV",
+        data=csv,
+        file_name=f'option_data_full_{data_date.replace("/", "")}.csv',
+        mime='text/csv',
+    )
+    # -----------------------------------------------
+
+    total_call_amt = df[df['Type'].str.contains('買|Call', case=False, na=False)]['Amount'].sum()
+    total_put_amt = df[df['Type'].str.contains('賣|Put', case=False, na=False)]['Amount'].sum()
+    pc_ratio_amt = (total_put_amt / total_call_amt) * 100 if total_call_amt > 0 else 0
+
+    c1, c2, c3, c4 = st.columns([1.2, 0.8, 1, 1])
+    current_time_str = datetime.now(tz=TW_TZ).strftime('%Y/%m/%d %H:%M:%S')
+    
+    c1.markdown(f"""
+        <div style="text-align: left;">
+            <span style="font-size: 14px; color: #555;">製圖時間</span><br>
+            <span style="font-size: 18px; font-weight: bold;">{current_time_str}</span>
+        </div>
+    """, unsafe_allow_html=True)
+    
+    c2.metric("大盤現貨", f"{int(taiex_now) if taiex_now else 'N/A'}")
+    
+    trend = "偏多" if pc_ratio_amt > 100 else "偏空"
+    trend_color = "normal" if pc_ratio_amt > 100 else "inverse"
+    c3.metric("全市場 P/C 金額比", f"{pc_ratio_amt:.1f}%", f"{trend}格局", delta_color=trend_color)
+    c4.metric("資料來源日期", data_date)
+    
+    st.markdown("---")
+
+    unique_codes = df['Month'].unique()
+    all_contracts = []
+    
+    for code in unique_codes:
+        s_date_str = get_settlement_date(code)
+        if s_date_str == "9999/99/99": continue
+        if s_date_str > data_date: 
+            all_contracts.append({'code': code, 'date': s_date_str})
+    
+    all_contracts.sort(key=lambda x: x['date'])
+    
+    if not all_contracts:
+        st.warning("無未來合約數據")
+        return
+
+    plot_targets = []
+    nearest = all_contracts[0]
+    plot_targets.append({'title': '最近結算', 'info': nearest})
+    
+    monthly = next((c for c in all_contracts if len(c['code']) == 6), None)
+    if monthly:
+        if monthly['code'] != nearest['code']:
+            plot_targets.append({'title': '當月月選', 'info': monthly})
+        else:
+             plot_targets[0]['title'] = '最近結算 (同月選)'
+
+    cols = st.columns(len(plot_targets))
+    
+    for i, target in enumerate(plot_targets):
+        with cols[i]:
+            m_code = target['info']['code']
+            s_date = target['info']['date']
+            c_title = target['title']
+            
+            df_target = df[df['Month'] == m_code]
+            sub_call = df_target[df_target['Type'].str.contains('Call|買', case=False, na=False)]['Amount'].sum()
+            sub_put = df_target[df_target['Type'].str.contains('Put|賣', case=False, na=False)]['Amount'].sum()
+            sub_ratio = (sub_put / sub_call * 100) if sub_call > 0 else 0
+            sub_status = "偏多" if sub_ratio > 100 else "偏空"
+            
+            title_text = (
+                f"<b>【{c_title}】 {m_code}</b><br>"
+                f"<span style='font-size: 14px;'>結算: {s_date}</span><br>"
+                f"<span style='font-size: 14px;'>P/C金額比: {sub_ratio:.1f}% ({sub_status})</span>"
+            )
+            
+            fig = plot_tornado_chart(df_target, title_text, taiex_now)
+            st.plotly_chart(fig, use_container_width=True)
+
+if __name__ == "__main__":
+    main()
