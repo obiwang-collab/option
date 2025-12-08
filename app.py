@@ -8,6 +8,7 @@ from datetime import datetime, timedelta
 from io import StringIO
 import matplotlib.font_manager as fm
 import os
+import time # 新增 time 模組
 
 # --- 1. 網頁設定 ---
 st.set_page_config(
@@ -53,6 +54,44 @@ def get_settlement_date(contract_code):
     except:
         return "9999/99/99"
 
+def get_realtime_taiex():
+    """
+    從證交所 MIS 抓取即時大盤指數
+    """
+    ts = int(time.time() * 1000)
+    url = f"https://mis.twse.com.tw/stock/api/getStockInfo.jsp?ex_ch=tse_t00.tw&json=1&delay=0&_={ts}"
+    
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+    }
+    
+    try:
+        res = requests.get(url, headers=headers, timeout=5)
+        data = res.json()
+        
+        if 'msgArray' in data and len(data['msgArray']) > 0:
+            info = data['msgArray'][0]
+            
+            # z = 當盤成交價, y = 昨日收盤價
+            current_price = info.get('z', '-')
+            yesterday_close = info.get('y', '-')
+            
+            if current_price == '-' or current_price == '':
+                current_price = info.get('o', yesterday_close)
+
+            try:
+                cur_val = float(current_price)
+                y_val = float(yesterday_close)
+                diff = cur_val - y_val
+                percent = (diff / y_val) * 100
+                return cur_val, diff, percent
+            except:
+                return None, None, None
+    except:
+        pass
+    
+    return None, None, None
+
 @st.cache_data(ttl=300) 
 def get_option_data():
     url = "https://www.taifex.com.tw/cht/3/optDailyMarketReport"
@@ -61,7 +100,6 @@ def get_option_data():
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
     }
 
-    # 嘗試往回找 5 天
     for i in range(5):
         query_date = (datetime.now() - timedelta(days=i)).strftime('%Y/%m/%d')
         
@@ -75,7 +113,6 @@ def get_option_data():
         try:
             res = requests.post(url, data=payload, headers=headers, timeout=10)
             
-            # 檢查內容是否有效
             if len(res.text) < 500 or "查無資料" in res.text:
                 continue 
 
@@ -89,7 +126,6 @@ def get_option_data():
             
             if not all(col in df.columns for col in required_cols): continue
 
-            # --- 處理千分位逗號 ---
             df = df[required_cols].copy()
             df.columns = ['Month', 'Strike', 'Type', 'OI']
             
@@ -102,7 +138,6 @@ def get_option_data():
             if df['OI'].sum() == 0:
                 continue 
 
-            # 回傳 DataFrame 以及 抓到的日期
             return df, query_date
             
         except Exception as e:
@@ -116,29 +151,41 @@ st.title("📊 台指期選擇權(TXO) 支撐壓力戰情室")
 
 with st.sidebar:
     st.write("### 功能選單")
+    # 這裡的刷新按鈕現在也會刷新大盤指數
     if st.button("🔄 刷新即時數據", type="primary"):
         st.cache_data.clear()
         st.session_state['refresh'] = True
 
 if True:
-    with st.spinner('連線期交所中...'):
+    # 1. 先抓盤後籌碼 (有快取)
+    with st.spinner('讀取資料中...'):
         df, data_date = get_option_data()
+        
+        # 2. 抓取即時大盤 (不使用快取，或者快取極短，這裡直接呼叫)
+        taiex_now, taiex_diff, taiex_pct = get_realtime_taiex()
+
+    # --- 顯示大盤指數區塊 ---
+    if taiex_now is not None:
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            st.metric("加權指數 (TAIEX)", f"{taiex_now:,.2f}", f"{taiex_diff:+.2f} ({taiex_pct:+.2f}%)")
+        with c2:
+            st.caption(f"盤後籌碼日期：{data_date}")
+        with c3:
+            st.caption("指數來源：TWSE MIS (即時)")
+        st.divider() # 畫一條分隔線
+    else:
+        st.warning("⚠️ 無法連線至證交所獲取即時大盤，僅顯示盤後籌碼。")
 
     if df is None or df.empty:
-        st.warning("⚠️ 最近 5 天查無有效合約資料，請稍後再試。")
+        st.warning("⚠️ 最近 5 天查無有效選擇權合約資料。")
     else:
-        st.success(f"✅ 已載入數據，資料日期：{data_date}")
-
         all_months = df['Month'].unique()
         dataset_list = []
         
         for month in all_months:
             s_date = get_settlement_date(month)
             
-            # ==========================================
-            # 修改處：過濾已結算合約邏輯
-            # 如果 結算日 <= 資料日期，代表已過期，跳過不處理
-            # ==========================================
             if s_date <= data_date:
                 continue
             
@@ -155,7 +202,7 @@ if True:
                 dataset_list.append({'month': month, 'data': df_show, 'settle_date': s_date})
         
         if not dataset_list:
-            st.info("無有效合約資料 (所有合約皆已結算或無量)。")
+            st.info("無有效合約資料。")
         else:
             valid_datasets = sorted(dataset_list, key=lambda x: x['settle_date'])
 
@@ -163,9 +210,6 @@ if True:
             fig, axes = plt.subplots(num, 1, figsize=(18, 6 * num)) 
             if num == 1: axes = [axes]
 
-            # ==========================================
-            # 雲端字體載入邏輯
-            # ==========================================
             plt.style.use('seaborn-v0_8-white')
             
             font_path = 'msjh.ttc'
@@ -181,7 +225,11 @@ if True:
                 plt.rcParams['font.sans-serif'] = ['Microsoft JhengHei', 'Microsoft JhengHei UI', 'SimHei']
                 plt.rcParams['axes.unicode_minus'] = False 
 
-            full_title = f"台指期選擇權(TXO) 籌碼分佈    [數據日期：{data_date}]"
+            # 在標題中也顯示大盤
+            if taiex_now:
+                full_title = f"TXO 籌碼分佈 vs 大盤：{int(taiex_now)}  [數據日期：{data_date}]"
+            else:
+                full_title = f"TXO 籌碼分佈    [數據日期：{data_date}]"
             
             if prop:
                 fig.suptitle(full_title, fontsize=20, fontweight='bold', y=0.96, color='#333333', fontproperties=prop)
@@ -204,6 +252,10 @@ if True:
 
                 ax.bar(strikes + bw/2, c_oi, width=bw, color=call_color, alpha=0.85, label='Call (壓力)')
                 ax.bar(strikes - bw/2, p_oi, width=bw, color=put_color, alpha=0.85, label='Put (支撐)')
+                
+                # --- 新增功能：畫出大盤目前位置的虛線 ---
+                if taiex_now:
+                    ax.axvline(x=taiex_now, color='#ff9900', linestyle='--', linewidth=2, label=f'大盤 ({int(taiex_now)})')
 
                 title_text = f"合約：{m_code}  [預估結算：{s_date}]"
                 if prop:
