@@ -145,4 +145,92 @@ if True:
             df_call = df_m[is_call][['Strike', 'OI']].rename(columns={'OI': 'Call_OI'})
             df_put = df_m[~is_call][['Strike', 'OI']].rename(columns={'OI': 'Put_OI'})
             
-            df_merge = pd.merge(df_call, df_put, on='Strike', how='outer
+            df_merge = pd.merge(df_call, df_put, on='Strike', how='outer').fillna(0).sort_values('Strike')
+            df_show = df_merge[(df_merge['Call_OI'] > 200) | (df_merge['Put_OI'] > 200)]
+            
+            if not df_show.empty and (df_show['Call_OI'].max() >= 500 or df_show['Put_OI'].max() >= 500):
+                dataset_list.append({'month': month, 'data': df_show, 'settle_date': s_date})
+        
+        if not dataset_list:
+            st.info("無有效合約資料 (過濾後無剩餘資料)。")
+        else:
+            valid_datasets = sorted(dataset_list, key=lambda x: x['settle_date'])
+
+            num = len(valid_datasets)
+            fig, axes = plt.subplots(num, 1, figsize=(18, 6 * num)) 
+            if num == 1: axes = [axes]
+
+            # ==========================================
+            # 雲端字體載入邏輯 (保留你原本的設定以支援中文)
+            # ==========================================
+            plt.style.use('seaborn-v0_8-white')
+            
+            # 1. 優先尋找同目錄下的 msjh.ttc (雲端用)
+            font_path = 'msjh.ttc'
+            prop = None
+            if os.path.exists(font_path):
+                try:
+                    prop = fm.FontProperties(fname=font_path)
+                    plt.rcParams['font.family'] = prop.get_name()
+                except:
+                    pass
+            
+            # 2. 本地端備用字體
+            if prop is None:
+                plt.rcParams['font.sans-serif'] = ['Microsoft JhengHei', 'Microsoft JhengHei UI', 'SimHei']
+                plt.rcParams['axes.unicode_minus'] = False 
+
+            # 標題加入日期
+            full_title = f"台指期選擇權(TXO) 籌碼分佈    [數據日期：{data_date}]"
+            
+            if prop:
+                fig.suptitle(full_title, fontsize=20, fontweight='bold', y=0.96, color='#333333', fontproperties=prop)
+            else:
+                fig.suptitle(full_title, fontsize=20, fontweight='bold', y=0.96, color='#333333')
+
+            for i, item in enumerate(valid_datasets):
+                ax = axes[i]
+                m_code = item['month']
+                data = item['data']
+                s_date = item['settle_date']
+                
+                strikes = data['Strike'].values
+                c_oi = data['Call_OI'].values
+                p_oi = data['Put_OI'].values
+                
+                bw = np.min(np.diff(strikes)) * 0.4 if len(strikes) > 1 else 20
+                call_color = '#d62728' 
+                put_color = '#2ca02c'  
+
+                ax.bar(strikes + bw/2, c_oi, width=bw, color=call_color, alpha=0.85, label='Call (壓力)')
+                ax.bar(strikes - bw/2, p_oi, width=bw, color=put_color, alpha=0.85, label='Put (支撐)')
+
+                title_text = f"合約：{m_code}  [預估結算：{s_date}]"
+                if prop:
+                    ax.set_title(title_text, fontsize=14, fontweight='bold', loc='left', pad=12, color='#003366', fontproperties=prop)
+                    if i == 0: ax.legend(loc='upper right', frameon=True, fontsize=12, prop=prop)
+                else:
+                    ax.set_title(title_text, fontsize=14, fontweight='bold', loc='left', pad=12, color='#003366')
+                    if i == 0: ax.legend(loc='upper right', frameon=True, fontsize=12)
+
+                ax.grid(axis='y', linestyle='--', alpha=0.3)
+                ax.spines['top'].set_visible(False)
+                ax.spines['right'].set_visible(False)
+                ax.spines['left'].set_visible(False)
+                ax.tick_params(axis='y', length=0)
+
+                ax.text(strikes[np.argmax(c_oi)] + bw/2, np.max(c_oi) + 50, f'{int(np.max(c_oi))}', 
+                        ha='center', va='bottom', color=call_color, fontweight='bold', fontsize=11)
+                ax.text(strikes[np.argmax(p_oi)] - bw/2, np.max(p_oi) + 50, f'{int(np.max(p_oi))}', 
+                        ha='center', va='bottom', color=put_color, fontweight='bold', fontsize=11)
+
+                ax.set_xticks(strikes)
+                
+                if len(strikes) > 40: step = 2 
+                else: step = 1 
+
+                labels = [str(int(s)) if idx % step == 0 else '' for idx, s in enumerate(strikes)]
+                ax.set_xticklabels(labels, rotation=45, fontsize=12)
+
+            plt.subplots_adjust(top=0.92, bottom=0.08, hspace=0.5)
+            st.pyplot(fig, use_container_width=True)
