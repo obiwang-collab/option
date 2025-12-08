@@ -4,7 +4,7 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import numpy as np
 import calendar
-from datetime import datetime, timedelta  # 修改1: 補上 timedelta
+from datetime import datetime, timedelta 
 from io import StringIO
 import matplotlib.font_manager as fm
 import os
@@ -53,17 +53,16 @@ def get_settlement_date(contract_code):
     except:
         return "9999/99/99"
 
-# 修改2: 這是修復後的抓資料函數，移除顯示指令以避免報錯
+# 修改重點：加入日期回溯 + 去除逗號邏輯 + 回傳日期字串
 @st.cache_data(ttl=300) 
 def get_option_data():
     url = "https://www.taifex.com.tw/cht/3/optDailyMarketReport"
     
-    # 增加 User-Agent 避免被擋
     headers = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
     }
 
-    # 嘗試往回找 5 天 (自動處理假日或尚未產出報表的情況)
+    # 嘗試往回找 5 天
     for i in range(5):
         query_date = (datetime.now() - timedelta(days=i)).strftime('%Y/%m/%d')
         
@@ -79,7 +78,7 @@ def get_option_data():
             
             # 檢查內容是否有效
             if len(res.text) < 500 or "查無資料" in res.text:
-                continue # 沒資料就換下一天
+                continue 
 
             dfs = pd.read_html(StringIO(res.text))
             if not dfs: continue
@@ -91,20 +90,30 @@ def get_option_data():
             
             if not all(col in df.columns for col in required_cols): continue
 
-            # --- 成功抓到資料，回傳 ---
+            # --- 關鍵修正區：處理千分位逗號 ---
             df = df[required_cols].copy()
             df.columns = ['Month', 'Strike', 'Type', 'OI']
-            df = df[pd.to_numeric(df['Strike'], errors='coerce').notnull()]
-            df['Strike'] = df['Strike'].astype(float)
+            
+            # 先轉成字串，把逗號拿掉，再轉數字 (這是之前缺少的步驟)
+            df['Strike'] = df['Strike'].astype(str).str.replace(',', '') 
+            df['OI'] = df['OI'].astype(str).str.replace(',', '')
+            
+            df['Strike'] = pd.to_numeric(df['Strike'], errors='coerce')
             df['OI'] = pd.to_numeric(df['OI'], errors='coerce').fillna(0)
-            return df
+            
+            # 確保有抓到有效數據 (避免全0的情況)
+            if df['OI'].sum() == 0:
+                continue 
+
+            # 回傳 DataFrame 以及 抓到的日期
+            return df, query_date
             
         except Exception as e:
-            continue # 發生錯誤就繼續往回找
+            continue 
 
-    return None
+    return None, None
 
-# --- 3. 主程式邏輯 (完全保持原樣) ---
+# --- 3. 主程式邏輯 ---
 
 st.title("📊 台指期選擇權(TXO) 支撐壓力戰情室")
 
@@ -116,11 +125,15 @@ with st.sidebar:
 
 if True:
     with st.spinner('連線期交所中...'):
-        df = get_option_data()
+        # 這裡會接收兩個回傳值：資料表 和 資料日期
+        df, data_date = get_option_data()
 
     if df is None or df.empty:
-        st.warning("⚠️ 暫無資料，請稍後再試。")
+        st.warning("⚠️ 最近 5 天查無有效合約資料，請稍後再試。")
     else:
+        # 顯示資料日期
+        st.success(f"✅ 已載入數據，資料日期：{data_date}")
+
         all_months = df['Month'].unique()
         dataset_list = []
         
@@ -132,97 +145,4 @@ if True:
             df_call = df_m[is_call][['Strike', 'OI']].rename(columns={'OI': 'Call_OI'})
             df_put = df_m[~is_call][['Strike', 'OI']].rename(columns={'OI': 'Put_OI'})
             
-            df_merge = pd.merge(df_call, df_put, on='Strike', how='outer').fillna(0).sort_values('Strike')
-            df_show = df_merge[(df_merge['Call_OI'] > 200) | (df_merge['Put_OI'] > 200)]
-            
-            if not df_show.empty and (df_show['Call_OI'].max() >= 500 or df_show['Put_OI'].max() >= 500):
-                dataset_list.append({'month': month, 'data': df_show, 'settle_date': s_date})
-        
-        if not dataset_list:
-            st.info("無有效合約資料。")
-        else:
-            valid_datasets = sorted(dataset_list, key=lambda x: x['settle_date'])
-
-            num = len(valid_datasets)
-            fig, axes = plt.subplots(num, 1, figsize=(18, 6 * num)) 
-            if num == 1: axes = [axes]
-
-            # ==========================================
-            # 關鍵修正：雲端字體載入邏輯
-            # ==========================================
-            plt.style.use('seaborn-v0_8-white')
-            
-            # 1. 優先尋找同目錄下的 msjh.ttc (這是給雲端用的)
-            font_path = 'msjh.ttc'
-            prop = None
-            if os.path.exists(font_path):
-                try:
-                    prop = fm.FontProperties(fname=font_path)
-                    # 設定全域字體為該檔案
-                    plt.rcParams['font.family'] = prop.get_name()
-                except:
-                    pass
-            
-            # 2. 如果找不到檔案，退回使用系統字體 (這是給你電腦用的)
-            if prop is None:
-                plt.rcParams['font.sans-serif'] = ['Microsoft JhengHei', 'Microsoft JhengHei UI', 'SimHei']
-                plt.rcParams['axes.unicode_minus'] = False 
-
-            today_str = datetime.now().strftime('%Y-%m-%d')
-            now_str = datetime.now().strftime('%H:%M')
-            
-            full_title = f"台指期選擇權(TXO) 籌碼分佈    [資料日期：{today_str} {now_str}]"
-            
-            # 如果有找到字體檔，就套用 fontproperties
-            if prop:
-                fig.suptitle(full_title, fontsize=20, fontweight='bold', y=0.96, color='#333333', fontproperties=prop)
-            else:
-                fig.suptitle(full_title, fontsize=20, fontweight='bold', y=0.96, color='#333333')
-
-            for i, item in enumerate(valid_datasets):
-                ax = axes[i]
-                m_code = item['month']
-                data = item['data']
-                s_date = item['settle_date']
-                
-                strikes = data['Strike'].values
-                c_oi = data['Call_OI'].values
-                p_oi = data['Put_OI'].values
-                
-                bw = np.min(np.diff(strikes)) * 0.4 if len(strikes) > 1 else 20
-                call_color = '#d62728' 
-                put_color = '#2ca02c'  
-
-                ax.bar(strikes + bw/2, c_oi, width=bw, color=call_color, alpha=0.85, label='Call (壓力)')
-                ax.bar(strikes - bw/2, p_oi, width=bw, color=put_color, alpha=0.85, label='Put (支撐)')
-
-                title_text = f"合約：{m_code}  [預估結算：{s_date}]"
-                if prop:
-                    ax.set_title(title_text, fontsize=14, fontweight='bold', loc='left', pad=12, color='#003366', fontproperties=prop)
-                    # 圖例
-                    if i == 0: ax.legend(loc='upper right', frameon=True, fontsize=12, prop=prop)
-                else:
-                    ax.set_title(title_text, fontsize=14, fontweight='bold', loc='left', pad=12, color='#003366')
-                    if i == 0: ax.legend(loc='upper right', frameon=True, fontsize=12)
-
-                ax.grid(axis='y', linestyle='--', alpha=0.3)
-                ax.spines['top'].set_visible(False)
-                ax.spines['right'].set_visible(False)
-                ax.spines['left'].set_visible(False)
-                ax.tick_params(axis='y', length=0)
-
-                ax.text(strikes[np.argmax(c_oi)] + bw/2, np.max(c_oi) + 50, f'{int(np.max(c_oi))}', 
-                        ha='center', va='bottom', color=call_color, fontweight='bold', fontsize=11)
-                ax.text(strikes[np.argmax(p_oi)] - bw/2, np.max(p_oi) + 50, f'{int(np.max(p_oi))}', 
-                        ha='center', va='bottom', color=put_color, fontweight='bold', fontsize=11)
-
-                ax.set_xticks(strikes)
-                
-                if len(strikes) > 40: step = 2 
-                else: step = 1 
-
-                labels = [str(int(s)) if idx % step == 0 else '' for idx, s in enumerate(strikes)]
-                ax.set_xticklabels(labels, rotation=45, fontsize=12)
-
-            plt.subplots_adjust(top=0.92, bottom=0.08, hspace=0.5)
-            st.pyplot(fig, use_container_width=True)
+            df_merge = pd.merge(df_call, df_put, on='Strike', how='outer
