@@ -59,12 +59,12 @@ def get_settlement_date(contract_code):
 
 def get_realtime_taiex():
     """
-    修改版：從 Yahoo Finance 抓取即時大盤 (UTC+8)
-    修正：加入 timestamp 參數以防止 API 快取導致資料延遲
+    更新版：改用 Yahoo Finance 'Quote' API (報價接口)
+    優點：比 Chart API 更即時，延遲通常在 1 分鐘內
     """
-    # 取得當下時間戳記 (整數秒)，加入網址後面當作亂數
     ts = int(time.time())
-    url = f"https://query1.finance.yahoo.com/v8/finance/chart/%5ETWII?interval=1d&_={ts}"
+    # 改用 v7/finance/quote 接口
+    url = f"https://query1.finance.yahoo.com/v7/finance/quote?symbols=%5ETWII&_={ts}"
     
     headers = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
@@ -73,21 +73,34 @@ def get_realtime_taiex():
     try:
         res = requests.get(url, headers=headers, timeout=3)
         data = res.json()
-        if 'chart' in data and 'result' in data['chart']:
-            meta = data['chart']['result'][0]['meta']
-            current = meta.get('regularMarketPrice')
-            prev = meta.get('chartPreviousClose')
-            timestamp = meta.get('regularMarketTime')
-            
-            if timestamp:
-                time_str = datetime.fromtimestamp(timestamp, tz=TW_TZ).strftime('%Y-%m-%d %H:%M:%S')
-            else:
-                time_str = datetime.now(tz=TW_TZ).strftime('%Y-%m-%d %H:%M:%S')
+        
+        # 解析 Quote API 的 JSON 結構
+        if 'quoteResponse' in data and 'result' in data['quoteResponse']:
+            result = data['quoteResponse']['result']
+            if len(result) > 0:
+                info = result[0]
+                
+                current = info.get('regularMarketPrice')
+                change = info.get('regularMarketChange')
+                percent = info.get('regularMarketChangePercent')
+                timestamp = info.get('regularMarketTime')
+                
+                if timestamp:
+                    time_str = datetime.fromtimestamp(timestamp, tz=TW_TZ).strftime('%Y-%m-%d %H:%M:%S')
+                else:
+                    time_str = datetime.now(tz=TW_TZ).strftime('%Y-%m-%d %H:%M:%S')
 
-            if current and prev:
-                return current, current - prev, (current - prev)/prev * 100, time_str
-    except:
+                if current is not None:
+                    # 如果 change 是 None (有時會發生)，自己算
+                    if change is None and 'regularMarketPreviousClose' in info:
+                         prev = info['regularMarketPreviousClose']
+                         change = current - prev
+                         percent = (change / prev) * 100
+                    
+                    return current, change, percent, time_str
+    except Exception as e:
         pass
+        
     return None, None, None, datetime.now(tz=TW_TZ).strftime('%Y-%m-%d %H:%M:%S')
 
 @st.cache_data(ttl=300) 
@@ -157,7 +170,7 @@ def dashboard_content():
         with c3:
             st.caption(f"盤後籌碼：{data_date}")
             
-            # === 加入 JavaScript 動態倒數計時 ===
+            # === JavaScript 動態倒數計時 ===
             if auto_refresh:
                 countdown_html = """
                 <div id="countdown-timer" style="font-size: 0.8em; color: rgba(49, 51, 63, 0.6); margin-top: -10px;">
@@ -215,70 +228,4 @@ def dashboard_content():
         return
 
     valid_datasets = sorted(dataset_list, key=lambda x: x['settle_date'])
-    num = len(valid_datasets)
-    fig, axes = plt.subplots(num, 1, figsize=(18, 6 * num)) 
-    if num == 1: axes = [axes]
-
-    plt.style.use('seaborn-v0_8-white')
-    
-    # 字體設定
-    font_path = 'msjh.ttc'
-    prop = fm.FontProperties(fname=font_path) if os.path.exists(font_path) else None
-    if prop:
-        plt.rcParams['font.family'] = prop.get_name()
-    else:
-        plt.rcParams['font.sans-serif'] = ['Microsoft JhengHei', 'Microsoft JhengHei UI', 'SimHei']
-        plt.rcParams['axes.unicode_minus'] = False 
-
-    # 標題
-    title_str = f"TXO 籌碼分佈 vs 大盤：{int(taiex_now)}" if taiex_now else "TXO 籌碼分佈"
-    time_info = f"[更新：{taiex_time} (TW)]" if taiex_now else f"[日期：{data_date}]"
-    
-    fig.suptitle(f"{title_str}    {time_info}", fontsize=20, fontweight='bold', y=0.96, color='#333333', fontproperties=prop if prop else None)
-
-    for i, item in enumerate(valid_datasets):
-        ax = axes[i]
-        m_code = item['month']
-        data = item['data']
-        s_date = item['settle_date']
-        
-        strikes = data['Strike'].values
-        c_oi = data['Call_OI'].values
-        p_oi = data['Put_OI'].values
-        
-        bw = np.min(np.diff(strikes)) * 0.4 if len(strikes) > 1 else 20
-        
-        ax.bar(strikes + bw/2, c_oi, width=bw, color='#d62728', alpha=0.85, label='Call (壓力)')
-        ax.bar(strikes - bw/2, p_oi, width=bw, color='#2ca02c', alpha=0.85, label='Put (支撐)')
-        
-        # 大盤虛線
-        if taiex_now:
-            ax.axvline(x=taiex_now, color='#ff9900', linestyle='--', linewidth=2, label=f'大盤 ({int(taiex_now)})')
-
-        # 子標題
-        t_text = f"合約：{m_code}  [預估結算：{s_date}]"
-        ax.set_title(t_text, fontsize=14, fontweight='bold', loc='left', pad=12, color='#003366', fontproperties=prop if prop else None)
-        
-        if i == 0: 
-            ax.legend(loc='upper right', frameon=True, fontsize=12, prop=prop if prop else None)
-
-        ax.grid(axis='y', linestyle='--', alpha=0.3)
-        for s in ['top', 'right', 'left']: ax.spines[s].set_visible(False)
-        ax.tick_params(axis='y', length=0)
-
-        # 標註最大量
-        ax.text(strikes[np.argmax(c_oi)] + bw/2, np.max(c_oi) + 50, f'{int(np.max(c_oi))}', 
-                ha='center', va='bottom', color='#d62728', fontweight='bold', fontsize=11)
-        ax.text(strikes[np.argmax(p_oi)] - bw/2, np.max(p_oi) + 50, f'{int(np.max(p_oi))}', 
-                ha='center', va='bottom', color='#2ca02c', fontweight='bold', fontsize=11)
-
-        ax.set_xticks(strikes)
-        step = 2 if len(strikes) > 40 else 1
-        labels = [str(int(s)) if idx % step == 0 else '' for idx, s in enumerate(strikes)]
-        ax.set_xticklabels(labels, rotation=45, fontsize=12)
-
-    plt.subplots_adjust(top=0.92, bottom=0.08, hspace=0.5)
-    st.pyplot(fig, use_container_width=True)
-
-# --- 執行主要區塊 ---
-dashboard_content()
+    num = len(valid
