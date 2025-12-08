@@ -129,7 +129,7 @@ def get_option_data():
         except: continue 
     return None, None
 
-# --- 繪圖元件 (修正：聚焦範圍 ±1200 點) ---
+# --- 繪圖元件 (修正：標題三行顯示，邊距加大) ---
 def plot_tornado_chart(df_target, title_text, spot_price):
     is_call = df_target['Type'].str.contains('買|Call', case=False, na=False)
     
@@ -141,16 +141,13 @@ def plot_tornado_chart(df_target, title_text, spot_price):
     total_put_money = data['Put_Amt'].sum()
     total_call_money = data['Call_Amt'].sum()
     
-    # 1. 基礎篩選：只留有意義的單
+    # 1. 基礎篩選
     data = data[(data['Call_OI'] > 300) | (data['Put_OI'] > 300)]
     
-    # 2. 聚焦範圍邏輯 (Focus Logic)
-    # 設定顯示視窗：現貨價格 上下 1200 點 (總寬度 2400 點)
+    # 2. 聚焦範圍邏輯 (±1200點)
     FOCUS_RANGE = 1200 
-
     center_price = spot_price
     
-    # 如果沒抓到現貨，就改用「最大 Put OI」的位置當作中心
     if not center_price or center_price == 0:
         if not data.empty:
             center_price = data.loc[data['Put_OI'].idxmax(), 'Strike']
@@ -160,7 +157,6 @@ def plot_tornado_chart(df_target, title_text, spot_price):
     if center_price > 0:
         min_s = center_price - FOCUS_RANGE
         max_s = center_price + FOCUS_RANGE
-        # 強制裁切資料
         data = data[(data['Strike'] >= min_s) & (data['Strike'] <= max_s)]
     
     max_oi = max(data['Put_OI'].max(), data['Call_OI'].max()) if not data.empty else 1000
@@ -188,7 +184,6 @@ def plot_tornado_chart(df_target, title_text, spot_price):
     
     # 畫線 & 右側標籤
     if spot_price and spot_price > 0:
-        # 只有當現貨價格在目前顯示範圍內才畫
         if not data.empty and data['Strike'].min() <= spot_price <= data['Strike'].max():
             fig.add_hline(y=spot_price, line_dash="dash", line_color="#ff7f0e", line_width=2)
             annotations.append(dict(
@@ -233,12 +228,12 @@ def plot_tornado_chart(df_target, title_text, spot_price):
             ticktext=[f"{int(x_limit*0.75)}", f"{int(x_limit*0.5)}", f"{int(x_limit*0.25)}", "0", 
                       f"{int(x_limit*0.25)}", f"{int(x_limit*0.5)}", f"{int(x_limit*0.75)}"]
         ),
-        # 維持固定間隔 100 點，強制整數格式
         yaxis=dict(title='履約價', tickmode='linear', dtick=100, tickformat='d'),
         barmode='overlay',
         legend=dict(orientation="h", y=-0.1, x=0.5, xanchor="center"),
         height=750,
-        margin=dict(l=40, r=80, t=100, b=60),
+        # --- 關鍵修正：將頂部邊距 (t) 加大至 140，容納三行標題 ---
+        margin=dict(l=40, r=80, t=140, b=60), 
         annotations=annotations,
         paper_bgcolor='white',
         plot_bgcolor='white'
@@ -306,28 +301,4 @@ def main():
     monthly = next((c for c in all_contracts if len(c['code']) == 6), None)
     if monthly:
         if monthly['code'] != nearest['code']:
-            plot_targets.append({'title': '當月月選', 'info': monthly})
-        else:
-             plot_targets[0]['title'] = '最近結算 (同月選)'
-
-    cols = st.columns(len(plot_targets))
-    
-    for i, target in enumerate(plot_targets):
-        with cols[i]:
-            m_code = target['info']['code']
-            s_date = target['info']['date']
-            c_title = target['title']
-            
-            df_target = df[df['Month'] == m_code]
-            sub_call = df_target[df_target['Type'].str.contains('Call|買', case=False, na=False)]['Amount'].sum()
-            sub_put = df_target[df_target['Type'].str.contains('Put|賣', case=False, na=False)]['Amount'].sum()
-            sub_ratio = (sub_put / sub_call * 100) if sub_call > 0 else 0
-            sub_status = "偏多" if sub_ratio > 100 else "偏空"
-            
-            title_text = f"【{c_title}】 {m_code} <br>結算: {s_date} | P/C金額比: {sub_ratio:.1f}% ({sub_status})"
-            
-            fig = plot_tornado_chart(df_target, title_text, taiex_now)
-            st.plotly_chart(fig, use_container_width=True)
-
-if __name__ == "__main__":
-    main()
+            plot_targets.append({'title': '當月月選', '
