@@ -56,10 +56,8 @@ def get_settlement_date(contract_code):
 
 def get_realtime_taiex():
     """
-    修改版：改從 Yahoo Finance 抓取即時大盤指數 (^TWII)
-    原因：證交所 MIS 網站會擋 Streamlit Cloud 的 IP
+    修改版：從 Yahoo Finance 抓取即時大盤，並包含【精確時間戳記】
     """
-    # Yahoo Finance 的公開 API 網址
     url = "https://query1.finance.yahoo.com/v8/finance/chart/%5ETWII?interval=1d"
     
     headers = {
@@ -70,25 +68,31 @@ def get_realtime_taiex():
         res = requests.get(url, headers=headers, timeout=5)
         data = res.json()
         
-        # 解析 Yahoo 回傳的 JSON 結構
         if 'chart' in data and 'result' in data['chart']:
             meta = data['chart']['result'][0]['meta']
             
-            # regularMarketPrice = 目前價格 (或收盤價)
-            # chartPreviousClose = 昨日收盤價
             current_price = meta.get('regularMarketPrice')
             previous_close = meta.get('chartPreviousClose')
+            # 獲取時間戳記 (Unix Timestamp)
+            timestamp = meta.get('regularMarketTime')
             
+            # 將時間戳記轉為 readable string (YYYY-MM-DD HH:MM:SS)
+            if timestamp:
+                time_str = datetime.fromtimestamp(timestamp).strftime('%Y-%m-%d %H:%M:%S')
+            else:
+                time_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+
             if current_price and previous_close:
                 diff = current_price - previous_close
                 percent = (diff / previous_close) * 100
-                return current_price, diff, percent
+                # 回傳 4 個值：現價, 漲跌, 幅度, 時間字串
+                return current_price, diff, percent, time_str
                 
     except Exception as e:
         pass
-        # print(f"Yahoo抓取失敗: {e}") 
     
-    return None, None, None
+    # 失敗時回傳系統當前時間
+    return None, None, None, datetime.now().strftime('%Y-%m-%d %H:%M:%S')
 
 @st.cache_data(ttl=300) 
 def get_option_data():
@@ -159,8 +163,8 @@ if True:
     with st.spinner('連線資料源中...'):
         # 1. 抓盤後籌碼
         df, data_date = get_option_data()
-        # 2. 抓 Yahoo 即時大盤
-        taiex_now, taiex_diff, taiex_pct = get_realtime_taiex()
+        # 2. 抓 Yahoo 即時大盤 (包含時間)
+        taiex_now, taiex_diff, taiex_pct, taiex_time = get_realtime_taiex()
 
     # --- 顯示大盤指數區塊 ---
     if taiex_now is not None:
@@ -168,9 +172,9 @@ if True:
         with c1:
             st.metric("加權指數 (TAIEX)", f"{taiex_now:,.2f}", f"{taiex_diff:+.2f} ({taiex_pct:+.2f}%)")
         with c2:
-            st.caption(f"盤後籌碼日期：{data_date}")
+            st.caption(f"即時報價時間：{taiex_time}")
         with c3:
-            st.caption("指數來源：Yahoo Finance (雲端適用)")
+            st.caption(f"盤後籌碼日期：{data_date}")
         st.divider() 
     else:
         st.warning("⚠️ 無法獲取即時大盤 (Yahoo Finance 連線失敗)，僅顯示盤後籌碼。")
@@ -224,10 +228,11 @@ if True:
                 plt.rcParams['font.sans-serif'] = ['Microsoft JhengHei', 'Microsoft JhengHei UI', 'SimHei']
                 plt.rcParams['axes.unicode_minus'] = False 
 
+            # 修改標題：使用【taiex_time】(含秒數)
             if taiex_now:
-                full_title = f"TXO 籌碼分佈 vs 大盤：{int(taiex_now)}  [數據日期：{data_date}]"
+                full_title = f"TXO 籌碼分佈 vs 大盤：{int(taiex_now)}  [更新時間：{taiex_time}]"
             else:
-                full_title = f"TXO 籌碼分佈    [數據日期：{data_date}]"
+                full_title = f"TXO 籌碼分佈    [盤後數據日期：{data_date}]"
             
             if prop:
                 fig.suptitle(full_title, fontsize=20, fontweight='bold', y=0.96, color='#333333', fontproperties=prop)
