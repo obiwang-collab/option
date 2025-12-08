@@ -301,4 +301,33 @@ def main():
     monthly = next((c for c in all_contracts if len(c['code']) == 6), None)
     if monthly:
         if monthly['code'] != nearest['code']:
-            plot_targets.append({'title': '當月月選', '
+            plot_targets.append({'title': '當月月選', 'info': monthly})
+        else:
+             plot_targets[0]['title'] = '最近結算 (同月選)'
+
+    cols = st.columns(len(plot_targets))
+    
+    for i, target in enumerate(plot_targets):
+        with cols[i]:
+            m_code = target['info']['code']
+            s_date = target['info']['date']
+            c_title = target['title']
+            
+            df_target = df[df['Month'] == m_code]
+            sub_call = df_target[df_target['Type'].str.contains('Call|買', case=False, na=False)]['Amount'].sum()
+            sub_put = df_target[df_target['Type'].str.contains('Put|賣', case=False, na=False)]['Amount'].sum()
+            sub_ratio = (sub_put / sub_call * 100) if sub_call > 0 else 0
+            sub_status = "偏多" if sub_ratio > 100 else "偏空"
+            
+            # --- 關鍵修正：組合三行標題文字 ---
+            title_text = (
+                f"<b>【{c_title}】 {m_code}</b><br>"
+                f"<span style='font-size: 14px;'>結算: {s_date}</span><br>"
+                f"<span style='font-size: 14px;'>P/C金額比: {sub_ratio:.1f}% ({sub_status})</span>"
+            )
+            
+            fig = plot_tornado_chart(df_target, title_text, taiex_now)
+            st.plotly_chart(fig, use_container_width=True)
+
+if __name__ == "__main__":
+    main()
