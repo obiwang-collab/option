@@ -2,5 +2,5 @@ streamlit
 pandas
 plotly
 requests
+google-generativeai
 lxml
-html5lib
