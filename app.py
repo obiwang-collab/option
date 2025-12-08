@@ -53,7 +53,7 @@ def get_settlement_date(contract_code):
 
 @st.cache_data(ttl=60)
 def get_realtime_data():
-    """只取得大盤現貨 (移除期貨)"""
+    """只取得大盤現貨"""
     taiex = None
     ts = int(time.time())
     headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'}
@@ -129,7 +129,7 @@ def get_option_data():
         except: continue 
     return None, None
 
-# --- 繪圖元件 (移除期貨線，保留現貨線與整數Y軸) ---
+# --- 繪圖元件 (修正：聚焦範圍 ±1200 點) ---
 def plot_tornado_chart(df_target, title_text, spot_price):
     is_call = df_target['Type'].str.contains('買|Call', case=False, na=False)
     
@@ -141,18 +141,27 @@ def plot_tornado_chart(df_target, title_text, spot_price):
     total_put_money = data['Put_Amt'].sum()
     total_call_money = data['Call_Amt'].sum()
     
-    valid = data[(data['Call_OI'] > 300) | (data['Put_OI'] > 300)]
+    # 1. 基礎篩選：只留有意義的單
+    data = data[(data['Call_OI'] > 300) | (data['Put_OI'] > 300)]
     
-    min_s, max_s = 0, 99999
-    if not valid.empty:
-        min_s = valid['Strike'].min() - 200
-        max_s = valid['Strike'].max() + 200
-        
-    if spot_price:
-        min_s = min(min_s, spot_price - 200)
-        max_s = max(max_s, spot_price + 200)
+    # 2. 聚焦範圍邏輯 (Focus Logic)
+    # 設定顯示視窗：現貨價格 上下 1200 點 (總寬度 2400 點)
+    FOCUS_RANGE = 1200 
 
-    data = data[(data['Strike'] >= min_s) & (data['Strike'] <= max_s)]
+    center_price = spot_price
+    
+    # 如果沒抓到現貨，就改用「最大 Put OI」的位置當作中心
+    if not center_price or center_price == 0:
+        if not data.empty:
+            center_price = data.loc[data['Put_OI'].idxmax(), 'Strike']
+        else:
+            center_price = 0
+
+    if center_price > 0:
+        min_s = center_price - FOCUS_RANGE
+        max_s = center_price + FOCUS_RANGE
+        # 強制裁切資料
+        data = data[(data['Strike'] >= min_s) & (data['Strike'] <= max_s)]
     
     max_oi = max(data['Put_OI'].max(), data['Call_OI'].max()) if not data.empty else 1000
     x_limit = max_oi * 1.1
@@ -177,16 +186,18 @@ def plot_tornado_chart(df_target, title_text, spot_price):
 
     annotations = []
     
-    # 畫線 & 右側標籤 (僅現貨)
+    # 畫線 & 右側標籤
     if spot_price and spot_price > 0:
-        fig.add_hline(y=spot_price, line_dash="dash", line_color="#ff7f0e", line_width=2)
-        annotations.append(dict(
-            x=1, y=spot_price, xref="paper", yref="y",
-            text=f" 現貨 {int(spot_price)} ",
-            showarrow=False, xanchor="left", align="center",
-            font=dict(color="white", size=12),
-            bgcolor="#ff7f0e", bordercolor="#ff7f0e", borderpad=4
-        ))
+        # 只有當現貨價格在目前顯示範圍內才畫
+        if not data.empty and data['Strike'].min() <= spot_price <= data['Strike'].max():
+            fig.add_hline(y=spot_price, line_dash="dash", line_color="#ff7f0e", line_width=2)
+            annotations.append(dict(
+                x=1, y=spot_price, xref="paper", yref="y",
+                text=f" 現貨 {int(spot_price)} ",
+                showarrow=False, xanchor="left", align="center",
+                font=dict(color="white", size=12),
+                bgcolor="#ff7f0e", bordercolor="#ff7f0e", borderpad=4
+            ))
 
     # 角落金額框框
     annotations.append(dict(
@@ -222,7 +233,8 @@ def plot_tornado_chart(df_target, title_text, spot_price):
             ticktext=[f"{int(x_limit*0.75)}", f"{int(x_limit*0.5)}", f"{int(x_limit*0.25)}", "0", 
                       f"{int(x_limit*0.25)}", f"{int(x_limit*0.5)}", f"{int(x_limit*0.75)}"]
         ),
-        yaxis=dict(title='履約價', tickmode='linear', dtick=200, tickformat='d'),
+        # 維持固定間隔 100 點，強制整數格式
+        yaxis=dict(title='履約價', tickmode='linear', dtick=100, tickformat='d'),
         barmode='overlay',
         legend=dict(orientation="h", y=-0.1, x=0.5, xanchor="center"),
         height=750,
@@ -243,7 +255,7 @@ def main():
 
     with st.spinner('連線期交所中...'):
         df, data_date = get_option_data()
-        taiex_now = get_realtime_data() # 只抓現貨
+        taiex_now = get_realtime_data()
 
     if df is None:
         st.error("查無資料，請稍後再試")
@@ -253,11 +265,9 @@ def main():
     total_put_amt = df[df['Type'].str.contains('賣|Put', case=False, na=False)]['Amount'].sum()
     pc_ratio_amt = (total_put_amt / total_call_amt) * 100 if total_call_amt > 0 else 0
 
-    # 調整欄位顯示：使用 HTML 讓時間不被截斷
     c1, c2, c3, c4 = st.columns([1.2, 0.8, 1, 1])
     current_time_str = datetime.now(tz=TW_TZ).strftime('%Y/%m/%d %H:%M:%S')
     
-    # 修改 1: 使用 HTML 顯示完整時間，調整字體大小與顏色
     c1.markdown(f"""
         <div style="text-align: left;">
             <span style="font-size: 14px; color: #555;">製圖時間</span><br>
@@ -265,7 +275,6 @@ def main():
         </div>
     """, unsafe_allow_html=True)
     
-    # 修改 2: 移除期貨，只顯示現貨
     c2.metric("大盤現貨", f"{int(taiex_now) if taiex_now else 'N/A'}")
     
     trend = "偏多" if pc_ratio_amt > 100 else "偏空"
@@ -317,7 +326,6 @@ def main():
             
             title_text = f"【{c_title}】 {m_code} <br>結算: {s_date} | P/C金額比: {sub_ratio:.1f}% ({sub_status})"
             
-            # 呼叫繪圖 (不傳入期貨價格)
             fig = plot_tornado_chart(df_target, title_text, taiex_now)
             st.plotly_chart(fig, use_container_width=True)
 
