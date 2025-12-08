@@ -4,7 +4,7 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import numpy as np
 import calendar
-from datetime import datetime, timedelta 
+from datetime import datetime, timedelta, timezone # 修改: 引入 timezone
 from io import StringIO
 import matplotlib.font_manager as fm
 import os
@@ -18,6 +18,9 @@ st.set_page_config(
 )
 
 # --- 2. 工具函數區 ---
+
+# 定義台灣時區 (UTC+8)
+TW_TZ = timezone(timedelta(hours=8))
 
 MANUAL_SETTLEMENT_FIX = {
     '202501W1': '2025/01/02', 
@@ -56,7 +59,7 @@ def get_settlement_date(contract_code):
 
 def get_realtime_taiex():
     """
-    修改版：從 Yahoo Finance 抓取即時大盤，並包含【精確時間戳記】
+    修改版：從 Yahoo Finance 抓取即時大盤，並強制轉換為台灣時間 (UTC+8)
     """
     url = "https://query1.finance.yahoo.com/v8/finance/chart/%5ETWII?interval=1d"
     
@@ -73,26 +76,25 @@ def get_realtime_taiex():
             
             current_price = meta.get('regularMarketPrice')
             previous_close = meta.get('chartPreviousClose')
-            # 獲取時間戳記 (Unix Timestamp)
             timestamp = meta.get('regularMarketTime')
             
-            # 將時間戳記轉為 readable string (YYYY-MM-DD HH:MM:SS)
+            # 關鍵修改：將 Unix Timestamp 轉為【台灣時間】
             if timestamp:
-                time_str = datetime.fromtimestamp(timestamp).strftime('%Y-%m-%d %H:%M:%S')
+                # 這裡指定 tz=TW_TZ，確保轉出來是台灣時間
+                time_str = datetime.fromtimestamp(timestamp, tz=TW_TZ).strftime('%Y-%m-%d %H:%M:%S')
             else:
-                time_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                time_str = datetime.now(tz=TW_TZ).strftime('%Y-%m-%d %H:%M:%S')
 
             if current_price and previous_close:
                 diff = current_price - previous_close
                 percent = (diff / previous_close) * 100
-                # 回傳 4 個值：現價, 漲跌, 幅度, 時間字串
                 return current_price, diff, percent, time_str
                 
     except Exception as e:
         pass
     
-    # 失敗時回傳系統當前時間
-    return None, None, None, datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    # 失敗時回傳系統當前時間 (也要轉成台灣時間)
+    return None, None, None, datetime.now(tz=TW_TZ).strftime('%Y-%m-%d %H:%M:%S')
 
 @st.cache_data(ttl=300) 
 def get_option_data():
@@ -104,7 +106,8 @@ def get_option_data():
 
     # 嘗試往回找 5 天
     for i in range(5):
-        query_date = (datetime.now() - timedelta(days=i)).strftime('%Y/%m/%d')
+        # 這裡也改用台灣時間來計算日期，避免跨日時差導致日期錯誤
+        query_date = (datetime.now(tz=TW_TZ) - timedelta(days=i)).strftime('%Y/%m/%d')
         
         payload = {
             'queryType': '2', 'marketCode': '0', 'dateaddcnt': '',
@@ -172,7 +175,7 @@ if True:
         with c1:
             st.metric("加權指數 (TAIEX)", f"{taiex_now:,.2f}", f"{taiex_diff:+.2f} ({taiex_pct:+.2f}%)")
         with c2:
-            st.caption(f"即時報價時間：{taiex_time}")
+            st.caption(f"即時報價時間：{taiex_time} (TW)")
         with c3:
             st.caption(f"盤後籌碼日期：{data_date}")
         st.divider() 
@@ -228,9 +231,9 @@ if True:
                 plt.rcParams['font.sans-serif'] = ['Microsoft JhengHei', 'Microsoft JhengHei UI', 'SimHei']
                 plt.rcParams['axes.unicode_minus'] = False 
 
-            # 修改標題：使用【taiex_time】(含秒數)
             if taiex_now:
-                full_title = f"TXO 籌碼分佈 vs 大盤：{int(taiex_now)}  [更新時間：{taiex_time}]"
+                # 標題加上 (TW) 提示
+                full_title = f"TXO 籌碼分佈 vs 大盤：{int(taiex_now)}  [更新時間：{taiex_time} (TW)]"
             else:
                 full_title = f"TXO 籌碼分佈    [盤後數據日期：{data_date}]"
             
