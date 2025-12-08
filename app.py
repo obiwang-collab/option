@@ -95,6 +95,8 @@ def get_option_data():
         }
         try:
             res = requests.post(url, data=payload, headers=headers, timeout=5)
+            res.encoding = 'utf-8' # 強制設定編碼，防止中文亂碼
+            
             if "查無資料" in res.text or len(res.text) < 500: continue 
             
             dfs = pd.read_html(StringIO(res.text))
@@ -275,9 +277,7 @@ def main():
         st.error("查無資料，請稍後再試")
         return
 
-    # --- 關鍵修正：確保這裡下載的是「完整原始 df」 ---
-    # 此時的 df 包含所有履約價、所有月份，完全沒有被裁切
-    # 我還多加入了 Volume (成交量) 欄位
+    # CSV 下載
     csv = df.to_csv(index=False).encode('utf-8-sig')
     
     st.sidebar.markdown("---")
@@ -289,7 +289,6 @@ def main():
         file_name=f'option_data_full_{data_date.replace("/", "")}.csv',
         mime='text/csv',
     )
-    # -----------------------------------------------
 
     total_call_amt = df[df['Type'].str.contains('買|Call', case=False, na=False)]['Amount'].sum()
     total_put_amt = df[df['Type'].str.contains('賣|Put', case=False, na=False)]['Amount'].sum()
