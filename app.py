@@ -124,7 +124,7 @@ def get_option_data():
         except: continue 
     return None, None
 
-# --- 繪圖元件 (修正版：乾淨無文字，長度代表OI) ---
+# --- 繪圖元件 (修正版：Y軸強制顯示完整整數，無K縮寫) ---
 def plot_tornado_chart(df_target, title_text, spot_price, fut_price):
     is_call = df_target['Type'].str.contains('買|Call', case=False, na=False)
     
@@ -151,7 +151,6 @@ def plot_tornado_chart(df_target, title_text, spot_price, fut_price):
     fig.add_trace(go.Bar(
         y=data['Strike'], x=-data['Put_OI'], orientation='h', name='Put (支撐)',
         marker_color='#2ca02c', opacity=0.85,
-        # 移除 text 參數，讓畫面變乾淨
         customdata=data['Put_Amt'] / 100000000, 
         hovertemplate='<b>履約價: %{y}</b><br>Put OI: %{x} 口<br>Put 市值: %{customdata:.2f}億<extra></extra>'
     ))
@@ -160,7 +159,6 @@ def plot_tornado_chart(df_target, title_text, spot_price, fut_price):
     fig.add_trace(go.Bar(
         y=data['Strike'], x=data['Call_OI'], orientation='h', name='Call (壓力)',
         marker_color='#d62728', opacity=0.85,
-        # 移除 text 參數
         customdata=data['Call_Amt'] / 100000000,
         hovertemplate='<b>履約價: %{y}</b><br>Call OI: %{x} 口<br>Call 市值: %{customdata:.2f}億<extra></extra>'
     ))
@@ -188,7 +186,7 @@ def plot_tornado_chart(df_target, title_text, spot_price, fut_price):
             bgcolor="blue", bordercolor="blue", borderpad=4
         ))
 
-    # 角落金額框框 (保留，因為這是看全局資金最重要的指標)
+    # 角落金額框框
     annotations.append(dict(
         x=0.02, y=1.05, xref="paper", yref="paper",
         text=f"<b>Put 總金額</b><br>{total_put_money/100000000:.1f} 億",
@@ -222,7 +220,9 @@ def plot_tornado_chart(df_target, title_text, spot_price, fut_price):
             ticktext=[f"{int(x_limit*0.75)}", f"{int(x_limit*0.5)}", f"{int(x_limit*0.25)}", "0", 
                       f"{int(x_limit*0.25)}", f"{int(x_limit*0.5)}", f"{int(x_limit*0.75)}"]
         ),
-        yaxis=dict(title='履約價', tickmode='linear', dtick=200),
+        # --- 關鍵修正：tickformat='d' 強制顯示整數，不縮寫成 k ---
+        yaxis=dict(title='履約價', tickmode='linear', dtick=200, tickformat='d'),
+        # -----------------------------------------------------
         barmode='overlay',
         legend=dict(orientation="h", y=-0.1, x=0.5, xanchor="center"),
         height=750,
