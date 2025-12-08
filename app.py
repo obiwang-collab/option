@@ -124,7 +124,7 @@ def get_option_data():
         except: continue 
     return None, None
 
-# --- 繪圖元件 ---
+# --- 繪圖元件 (已修正：點數為主，金額為輔) ---
 def plot_tornado_chart(df_target, title_text, spot_price, fut_price):
     is_call = df_target['Type'].str.contains('買|Call', case=False, na=False)
     
@@ -136,17 +136,26 @@ def plot_tornado_chart(df_target, title_text, spot_price, fut_price):
     total_put_money = data['Put_Amt'].sum()
     total_call_money = data['Call_Amt'].sum()
     
+    # 篩選顯示範圍
     valid = data[(data['Call_OI'] > 300) | (data['Put_OI'] > 300)]
     if not valid.empty:
         min_s = valid['Strike'].min() - 100
         max_s = valid['Strike'].max() + 100
         data = data[(data['Strike'] >= min_s) & (data['Strike'] <= max_s)]
     
-    data['Put_Text'] = data['Put_OI'].apply(lambda x: str(int(x)) if x > 400 else "")
-    data['Call_Text'] = data['Call_OI'].apply(lambda x: str(int(x)) if x > 400 else "")
+    # --- 關鍵修正：製作標籤文字 (OI + 金額) ---
+    def make_label(oi, amt):
+        # 只有當 OI > 300 時才顯示，避免重疊太亂
+        if oi < 300: return ""
+        # 格式： 2500 (1.2億)
+        return f"{int(oi)} <span style='font-size:10px'>({amt/100000000:.1f}億)</span>"
+
+    data['Put_Text'] = [make_label(o, a) for o, a in zip(data['Put_OI'], data['Put_Amt'])]
+    data['Call_Text'] = [make_label(o, a) for o, a in zip(data['Call_OI'], data['Call_Amt'])]
+    # -------------------------------------
 
     max_oi = max(data['Put_OI'].max(), data['Call_OI'].max()) if not data.empty else 1000
-    x_limit = max_oi * 1.3
+    x_limit = max_oi * 1.35 # 稍微加大空間給文字標籤
 
     fig = go.Figure()
 
@@ -154,18 +163,22 @@ def plot_tornado_chart(df_target, title_text, spot_price, fut_price):
     fig.add_trace(go.Bar(
         y=data['Strike'], x=-data['Put_OI'], orientation='h', name='Put (支撐)',
         marker_color='#2ca02c', opacity=0.85,
-        text=data['Put_Text'], textposition='outside', textfont=dict(color='#2ca02c', size=11, family="Arial Black"),
+        text=data['Put_Text'], 
+        textposition='outside', 
+        textfont=dict(color='#2ca02c', size=12, family="Arial Black"),
         customdata=data['Put_Amt'] / 100000000, 
-        hovertemplate='<b>履約價: %{y}</b><br>Put OI: %{x}<br>Put 市值: %{customdata:.2f}億<extra></extra>'
+        hovertemplate='<b>履約價: %{y}</b><br>Put OI: %{x:.0f} 口<br>Put 市值: %{customdata:.2f}億<extra></extra>'
     ))
 
     # Call (右)
     fig.add_trace(go.Bar(
         y=data['Strike'], x=data['Call_OI'], orientation='h', name='Call (壓力)',
         marker_color='#d62728', opacity=0.85,
-        text=data['Call_Text'], textposition='outside', textfont=dict(color='#d62728', size=11, family="Arial Black"),
+        text=data['Call_Text'], 
+        textposition='outside', 
+        textfont=dict(color='#d62728', size=12, family="Arial Black"),
         customdata=data['Call_Amt'] / 100000000,
-        hovertemplate='<b>履約價: %{y}</b><br>Call OI: %{x}<br>Call 市值: %{customdata:.2f}億<extra></extra>'
+        hovertemplate='<b>履約價: %{y}</b><br>Call OI: %{x} 口<br>Call 市值: %{customdata:.2f}億<extra></extra>'
     ))
 
     annotations = []
@@ -191,7 +204,7 @@ def plot_tornado_chart(df_target, title_text, spot_price, fut_price):
             bgcolor="blue", bordercolor="blue", borderpad=4
         ))
 
-    # 角落金額框框
+    # 角落金額框框 (維持不變，這是看總量的)
     annotations.append(dict(
         x=0.02, y=1.05, xref="paper", yref="paper",
         text=f"<b>Put 總金額</b><br>{total_put_money/100000000:.1f} 億",
@@ -217,10 +230,11 @@ def plot_tornado_chart(df_target, title_text, spot_price, fut_price):
             font=dict(size=20, color="black")
         ),
         xaxis=dict(
-            title='未平倉量 (OI)',
+            title='未平倉量 (OI)', # X軸標題維持 OI
             range=[-x_limit, x_limit], 
             showgrid=True, zeroline=True, zerolinewidth=2, zerolinecolor='black',
             tickmode='array',
+            # 下方刻度維持顯示 OI 點數，不顯示金額
             tickvals=[-x_limit*0.75, -x_limit*0.5, -x_limit*0.25, 0, x_limit*0.25, x_limit*0.5, x_limit*0.75],
             ticktext=[f"{int(x_limit*0.75)}", f"{int(x_limit*0.5)}", f"{int(x_limit*0.25)}", "0", 
                       f"{int(x_limit*0.25)}", f"{int(x_limit*0.5)}", f"{int(x_limit*0.75)}"]
