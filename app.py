@@ -6,9 +6,10 @@ import time
 from datetime import datetime, timedelta, timezone
 from io import StringIO
 import calendar
+import re
 
 # --- 設定區 ---
-st.set_page_config(layout="wide", page_title="台指期籌碼戰情室 (APP最終版)")
+st.set_page_config(layout="wide", page_title="台指期籌碼戰情室 (APP完美版)")
 TW_TZ = timezone(timedelta(hours=8)) 
 
 # 手動修正結算日
@@ -16,38 +17,43 @@ MANUAL_SETTLEMENT_FIX = {
     '202501W1': '2025/01/02', 
 }
 
-# --- 輔助函式 ---
+# --- 核心：萬能結算日推算 ---
 def get_settlement_date(contract_code):
-    """推算結算日"""
-    code = str(contract_code).strip()
+    code = str(contract_code).strip().upper()
     for key, fix_date in MANUAL_SETTLEMENT_FIX.items():
         if key in code: return fix_date
+        
     try:
-        if len(code) < 5: return "9999/99/99"
+        if len(code) < 6: return "9999/99/99"
         year = int(code[:4])
         month = int(code[4:6])
+        
         c = calendar.monthcalendar(year, month)
         wednesdays = [week[calendar.WEDNESDAY] for week in c if week[calendar.WEDNESDAY] != 0]
         fridays = [week[calendar.FRIDAY] for week in c if week[calendar.FRIDAY] != 0]
+        
         day = None
         
-        if 'F1' in code: day = fridays[0] if len(fridays) >= 1 else None
-        elif 'F2' in code: day = fridays[1] if len(fridays) >= 2 else None
-        elif 'F3' in code: day = fridays[2] if len(fridays) >= 3 else None
-        elif 'W1' in code: day = wednesdays[0]
-        elif 'W2' in code: day = wednesdays[1]
-        elif 'W4' in code: day = wednesdays[3] if len(wednesdays) >= 4 else wednesdays[-1]
-        elif 'W5' in code: day = wednesdays[4] if len(wednesdays) >= 5 else None
+        if 'W' in code: # 週三結算
+            match = re.search(r'W(\d)', code)
+            if match:
+                week_num = int(match.group(1))
+                if len(wednesdays) >= week_num: day = wednesdays[week_num - 1]
+        elif 'F' in code: # 週五結算
+            match = re.search(r'F(\d)', code)
+            if match:
+                week_num = int(match.group(1))
+                if len(fridays) >= week_num: day = fridays[week_num - 1]
         else: # 月選
             if len(wednesdays) >= 3: day = wednesdays[2]
             
-        return f"{year}/{month:02d}/{day:02d}" if day else "9999/99/99"
-    except:
-        return "9999/99/99"
+        if day: return f"{year}/{month:02d}/{day:02d}"
+        else: return "9999/99/99"
+    except: return "9999/99/99"
 
 @st.cache_data(ttl=60)
 def get_realtime_data():
-    """取得大盤與期貨報價"""
+    """取得大盤與期貨"""
     taiex, fut = None, None
     ts = int(time.time())
     try:
@@ -68,7 +74,6 @@ def get_realtime_data():
         price = data['chart']['result'][0]['meta'].get('regularMarketPrice')
         if price: fut = float(price)
     except: pass
-    
     return taiex, fut
 
 @st.cache_data(ttl=300)
@@ -89,24 +94,29 @@ def get_option_data():
             
             dfs = pd.read_html(StringIO(res.text))
             df = dfs[0]
-            df.columns = [str(c).replace(' ', '').replace('*', '') for c in df.columns]
             
-            required_cols = ['到期月份(週別)', '履約價', '買賣權', '未沖銷契約量', '結算價']
-            if not all(col in df.columns for col in required_cols): continue
+            # 暴力欄位清洗
+            df.columns = [str(c).replace(' ', '').replace('*', '').replace('契約', '').strip() for c in df.columns]
             
-            df = df[required_cols].copy()
-            df.columns = ['Month', 'Strike', 'Type', 'OI', 'Price'] 
+            month_col = next((c for c in df.columns if '月' in c or '週' in c), None)
+            strike_col = next((c for c in df.columns if '履約' in c), None)
+            type_col = next((c for c in df.columns if '買賣' in c), None)
+            oi_col = next((c for c in df.columns if '未沖銷' in c or 'OI' in c), None)
+            price_col = next((c for c in df.columns if '結算' in c or '收盤' in c or 'Price' in c), None)
+
+            if not all([month_col, strike_col, type_col, oi_col, price_col]): continue
+
+            df = df.rename(columns={month_col:'Month', strike_col:'Strike', type_col:'Type', oi_col:'OI', price_col:'Price'})
+            df = df[['Month', 'Strike', 'Type', 'OI', 'Price']].copy()
             
-            # --- 強力資料清洗 (解決抓不到 Call 的問題) ---
             df = df.dropna(subset=['Type'])
-            df['Type'] = df['Type'].astype(str).str.strip() # 去除空白
+            df['Type'] = df['Type'].astype(str).str.strip()
             
-            # 數值轉換
             df['Strike'] = pd.to_numeric(df['Strike'].astype(str).str.replace(',', ''), errors='coerce')
             df['OI'] = pd.to_numeric(df['OI'].astype(str).str.replace(',', ''), errors='coerce').fillna(0)
-            df['Price'] = pd.to_numeric(df['Price'].astype(str).str.replace(',', ''), errors='coerce').fillna(0)
+            df['Price'] = df['Price'].astype(str).str.replace(',', '').replace('-', '0')
+            df['Price'] = pd.to_numeric(df['Price'], errors='coerce').fillna(0)
             
-            # 計算金額
             df['Amount'] = df['OI'] * df['Price'] * 50
             
             if df['OI'].sum() == 0: continue 
@@ -114,9 +124,8 @@ def get_option_data():
         except: continue 
     return None, None
 
-# --- 繪圖元件: 龍捲風圖 (Plotly版) ---
-def plot_tornado_chart(df_target, title, spot_price, fut_price):
-    # 寬鬆判斷 Call
+# --- 繪圖元件 ---
+def plot_tornado_chart(df_target, title_text, spot_price, fut_price):
     is_call = df_target['Type'].str.contains('買|Call', case=False, na=False)
     
     df_call = df_target[is_call][['Strike', 'OI', 'Amount']].rename(columns={'OI': 'Call_OI', 'Amount': 'Call_Amt'})
@@ -124,105 +133,118 @@ def plot_tornado_chart(df_target, title, spot_price, fut_price):
     
     data = pd.merge(df_call, df_put, on='Strike', how='outer').fillna(0).sort_values('Strike')
     
-    # 計算總金額
     total_put_money = data['Put_Amt'].sum()
     total_call_money = data['Call_Amt'].sum()
     
-    # 篩選顯示範圍 (只顯示大量區)
     valid = data[(data['Call_OI'] > 300) | (data['Put_OI'] > 300)]
     if not valid.empty:
         min_s = valid['Strike'].min() - 100
         max_s = valid['Strike'].max() + 100
         data = data[(data['Strike'] >= min_s) & (data['Strike'] <= max_s)]
     
-    # --- 優化文字標籤：只顯示 > 400 的數字 ---
     data['Put_Text'] = data['Put_OI'].apply(lambda x: str(int(x)) if x > 400 else "")
     data['Call_Text'] = data['Call_OI'].apply(lambda x: str(int(x)) if x > 400 else "")
 
-    # --- 強制對稱 X 軸 ---
-    max_oi = max(data['Put_OI'].max(), data['Call_OI'].max())
-    x_limit = max_oi * 1.3 # 留空間給文字
+    max_oi = max(data['Put_OI'].max(), data['Call_OI'].max()) if not data.empty else 1000
+    x_limit = max_oi * 1.3
 
     fig = go.Figure()
 
-    # Put (左, 綠色)
+    # Put (左)
     fig.add_trace(go.Bar(
         y=data['Strike'], x=-data['Put_OI'], orientation='h', name='Put (支撐)',
-        marker_color='#2ca02c',
-        text=data['Put_Text'], textposition='outside', # 使用過濾後的文字
+        marker_color='#2ca02c', opacity=0.85,
+        text=data['Put_Text'], textposition='outside', textfont=dict(color='#2ca02c', size=11, family="Arial Black"),
         customdata=data['Put_Amt'] / 100000000, 
         hovertemplate='<b>履約價: %{y}</b><br>Put OI: %{x}<br>Put 市值: %{customdata:.2f}億<extra></extra>'
     ))
 
-    # Call (右, 紅色)
+    # Call (右)
     fig.add_trace(go.Bar(
         y=data['Strike'], x=data['Call_OI'], orientation='h', name='Call (壓力)',
-        marker_color='#d62728',
-        text=data['Call_Text'], textposition='outside',
+        marker_color='#d62728', opacity=0.85,
+        text=data['Call_Text'], textposition='outside', textfont=dict(color='#d62728', size=11, family="Arial Black"),
         customdata=data['Call_Amt'] / 100000000,
         hovertemplate='<b>履約價: %{y}</b><br>Call OI: %{x}<br>Call 市值: %{customdata:.2f}億<extra></extra>'
     ))
 
-    # 價格線
+    annotations = []
+    
+    # 畫線 & 右側標籤
     if spot_price:
-        fig.add_hline(y=spot_price, line_dash="dash", line_color="#ff7f0e", annotation_text=f"現貨 {int(spot_price)}", annotation_position="top right")
+        fig.add_hline(y=spot_price, line_dash="dash", line_color="#ff7f0e", line_width=2)
+        annotations.append(dict(
+            x=1, y=spot_price, xref="paper", yref="y",
+            text=f" 現貨 {int(spot_price)} ",
+            showarrow=False, xanchor="left", align="center",
+            font=dict(color="white", size=12),
+            bgcolor="#ff7f0e", bordercolor="#ff7f0e", borderpad=4
+        ))
+
     if fut_price:
-        fig.add_hline(y=fut_price, line_dash="dashdot", line_color="blue", annotation_text=f"期貨 {int(fut_price)}", annotation_position="bottom right")
+        fig.add_hline(y=fut_price, line_dash="dashdot", line_color="blue", line_width=2)
+        annotations.append(dict(
+            x=1, y=fut_price, xref="paper", yref="y",
+            text=f" 期貨 {int(fut_price)} ",
+            showarrow=False, xanchor="left", align="center",
+            font=dict(color="white", size=12),
+            bgcolor="blue", bordercolor="blue", borderpad=4
+        ))
+
+    # 角落金額框框
+    annotations.append(dict(
+        x=0.02, y=1.05, xref="paper", yref="paper",
+        text=f"<b>Put 總金額</b><br>{total_put_money/100000000:.1f} 億",
+        showarrow=False, align="left",
+        font=dict(size=14, color="#2ca02c"),
+        bgcolor="white", bordercolor="#2ca02c", borderwidth=2, borderpad=6
+    ))
+    annotations.append(dict(
+        x=0.98, y=1.05, xref="paper", yref="paper",
+        text=f"<b>Call 總金額</b><br>{total_call_money/100000000:.1f} 億",
+        showarrow=False, align="right",
+        font=dict(size=14, color="#d62728"),
+        bgcolor="white", bordercolor="#d62728", borderwidth=2, borderpad=6
+    ))
 
     fig.update_layout(
-        title=dict(text=title, x=0.5),
+        title=dict(
+            text=title_text, 
+            y=0.95,
+            x=0.5, 
+            xanchor='center', 
+            yanchor='top',
+            font=dict(size=20, color="black")
+        ),
         xaxis=dict(
             title='未平倉量 (OI)',
-            range=[-x_limit, x_limit], # 強制對稱
-            showgrid=True,
-            zeroline=True, zerolinewidth=2, zerolinecolor='black',
-            # 自定義刻度顯示 (把負號拿掉)
+            range=[-x_limit, x_limit], 
+            showgrid=True, zeroline=True, zerolinewidth=2, zerolinecolor='black',
             tickmode='array',
             tickvals=[-x_limit*0.75, -x_limit*0.5, -x_limit*0.25, 0, x_limit*0.25, x_limit*0.5, x_limit*0.75],
             ticktext=[f"{int(x_limit*0.75)}", f"{int(x_limit*0.5)}", f"{int(x_limit*0.25)}", "0", 
                       f"{int(x_limit*0.25)}", f"{int(x_limit*0.5)}", f"{int(x_limit*0.75)}"]
         ),
-        yaxis=dict(
-            title='履約價', 
-            tickmode='linear', 
-            dtick=200 # 強制每隔 200 點顯示一個刻度，避免擁擠
-        ),
+        yaxis=dict(title='履約價', tickmode='linear', dtick=200),
         barmode='overlay',
-        legend=dict(orientation="h", y=1.05, x=0.3),
-        height=700, # 拉高圖表
-        margin=dict(l=40, r=40, t=80, b=40),
-        
-        # --- 顯示總金額的框框 (Annotations) ---
-        annotations=[
-            # 左上角 Put 金額
-            dict(
-                x=0.02, y=1.02, xref="paper", yref="paper",
-                text=f"<b>Put 總金額</b><br>{total_put_money/100000000:.1f} 億",
-                showarrow=False, align="left",
-                bgcolor="white", bordercolor="#2ca02c", borderwidth=2,
-                font=dict(size=14, color="#2ca02c")
-            ),
-            # 右上角 Call 金額
-            dict(
-                x=0.98, y=1.02, xref="paper", yref="paper",
-                text=f"<b>Call 總金額</b><br>{total_call_money/100000000:.1f} 億",
-                showarrow=False, align="right",
-                bgcolor="white", bordercolor="#d62728", borderwidth=2,
-                font=dict(size=14, color="#d62728")
-            )
-        ]
+        legend=dict(orientation="h", y=-0.1, x=0.5, xanchor="center"),
+        height=750,
+        margin=dict(l=40, r=80, t=100, b=60),
+        annotations=annotations,
+        paper_bgcolor='white',
+        plot_bgcolor='white'
     )
     return fig
 
 # --- 主程式 ---
 def main():
-    st.title("📊 台指期選擇權籌碼戰情室 (APP最終版)")
+    st.title("📊 台指期籌碼戰情室 (APP完美版)")
 
     if st.sidebar.button("🔄 重新整理"):
         st.cache_data.clear()
         st.rerun()
 
-    with st.spinner('計算籌碼金額中...'):
+    with st.spinner('連線期交所中...'):
         df, data_date = get_option_data()
         taiex_now, fut_now = get_realtime_data()
 
@@ -230,61 +252,65 @@ def main():
         st.error("查無資料，請稍後再試")
         return
 
-    # 計算全市場數據
     total_call_amt = df[df['Type'].str.contains('買|Call', case=False, na=False)]['Amount'].sum()
     total_put_amt = df[df['Type'].str.contains('賣|Put', case=False, na=False)]['Amount'].sum()
     pc_ratio_amt = (total_put_amt / total_call_amt) * 100 if total_call_amt > 0 else 0
 
     c1, c2, c3, c4 = st.columns(4)
-    c1.metric("資料日期", data_date)
+    current_time_str = datetime.now(tz=TW_TZ).strftime('%Y/%m/%d %H:%M:%S')
+    c1.metric("製圖時間", current_time_str)
     c2.metric("現貨 / 期貨", f"{int(taiex_now) if taiex_now else 'N/A'} / {int(fut_now) if fut_now else 'N/A'}")
     
     trend = "偏多" if pc_ratio_amt > 100 else "偏空"
     trend_color = "normal" if pc_ratio_amt > 100 else "inverse"
-    c3.metric("P/C 金額比 (市值)", f"{pc_ratio_amt:.1f}%", f"{trend}格局", delta_color=trend_color)
-    c4.metric("全市場總市值", f"{(total_call_amt+total_put_amt)/100000000:.1f} 億")
+    c3.metric("全市場 P/C 金額比", f"{pc_ratio_amt:.1f}%", f"{trend}格局", delta_color=trend_color)
+    c4.metric("資料來源日期", data_date)
     
     st.markdown("---")
 
-    unique_months = df['Month'].unique()
-    contracts = []
-    for m in unique_months:
-        s_date = get_settlement_date(m)
-        if s_date > data_date:
-            contracts.append({'code': m, 'date': s_date})
-    contracts.sort(key=lambda x: x['date'])
+    unique_codes = df['Month'].unique()
+    all_contracts = []
     
-    targets = []
-    if contracts:
-        targets.append({'type': '🔥 本週結算', 'info': contracts[0]})
-        monthly = next((c for c in contracts if len(c['code']) == 6), None)
-        if monthly and monthly['code'] != contracts[0]['code']:
-            targets.append({'type': '📅 當月結算', 'info': monthly})
-        elif monthly:
-             next_monthly = next((c for c in contracts if len(c['code']) == 6 and c['code'] != monthly['code']), None)
-             if next_monthly:
-                 targets.append({'type': '📅 次月結算', 'info': next_monthly})
-
-    if not targets:
-        st.warning("無合約資料")
+    for code in unique_codes:
+        s_date_str = get_settlement_date(code)
+        if s_date_str == "9999/99/99": continue
+        if s_date_str > data_date: 
+            all_contracts.append({'code': code, 'date': s_date_str})
+    
+    all_contracts.sort(key=lambda x: x['date'])
+    
+    if not all_contracts:
+        st.warning("無未來合約數據")
         return
 
-    # 左右並排顯示
-    cols = st.columns(len(targets))
-    for i, target in enumerate(targets):
+    plot_targets = []
+    nearest = all_contracts[0]
+    plot_targets.append({'title': '最近結算', 'info': nearest})
+    
+    monthly = next((c for c in all_contracts if len(c['code']) == 6), None)
+    if monthly:
+        if monthly['code'] != nearest['code']:
+            plot_targets.append({'title': '當月月選', 'info': monthly})
+        else:
+             plot_targets[0]['title'] = '最近結算 (同月選)'
+
+    cols = st.columns(len(plot_targets))
+    
+    for i, target in enumerate(plot_targets):
         with cols[i]:
             m_code = target['info']['code']
             s_date = target['info']['date']
+            c_title = target['title']
             
-            # 取得該合約的 P/C Ratio
             df_target = df[df['Month'] == m_code]
             sub_call = df_target[df_target['Type'].str.contains('Call|買', case=False, na=False)]['Amount'].sum()
             sub_put = df_target[df_target['Type'].str.contains('Put|賣', case=False, na=False)]['Amount'].sum()
             sub_ratio = (sub_put / sub_call * 100) if sub_call > 0 else 0
+            sub_status = "偏多" if sub_ratio > 100 else "偏空"
             
-            title = f"{target['type']} ({m_code}) - P/C金額比: {sub_ratio:.1f}%"
+            title_text = f"【{c_title}】 {m_code} <br>結算: {s_date} | P/C金額比: {sub_ratio:.1f}% ({sub_status})"
             
-            fig = plot_tornado_chart(df_target, title, taiex_now, fut_now)
+            fig = plot_tornado_chart(df_target, title_text, taiex_now, fut_now)
             st.plotly_chart(fig, use_container_width=True)
 
 if __name__ == "__main__":
