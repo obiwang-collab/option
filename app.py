@@ -4,7 +4,7 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import numpy as np
 import calendar
-from datetime import datetime, timedelta  # 修改1: 增加 timedelta 模組
+from datetime import datetime, timedelta  # 修改1: 補上 timedelta
 from io import StringIO
 import matplotlib.font_manager as fm
 import os
@@ -53,47 +53,45 @@ def get_settlement_date(contract_code):
     except:
         return "9999/99/99"
 
-@st.cache_data(ttl=60) 
+# 修改2: 這是修復後的抓資料函數，移除顯示指令以避免報錯
+@st.cache_data(ttl=300) 
 def get_option_data():
     url = "https://www.taifex.com.tw/cht/3/optDailyMarketReport"
     
-    # 修改2: 增加 User-Agent 避免被擋，並加入回溯迴圈
+    # 增加 User-Agent 避免被擋
     headers = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
     }
 
-    # 嘗試往回找 5 天 (涵蓋週末與國定假日)
+    # 嘗試往回找 5 天 (自動處理假日或尚未產出報表的情況)
     for i in range(5):
         query_date = (datetime.now() - timedelta(days=i)).strftime('%Y/%m/%d')
         
         payload = {
             'queryType': '2', 'marketCode': '0', 'dateaddcnt': '',
             'commodity_id': 'TXO', 'commodity_id2': '', 
-            'queryDate': query_date, # 使用動態日期
+            'queryDate': query_date, 
             'MarketCode': '0', 'commodity_idt': 'TXO'
         }
 
         try:
             res = requests.post(url, data=payload, headers=headers, timeout=10)
             
-            # 如果回傳內容太短或包含查無資料，就跳過，找前一天
+            # 檢查內容是否有效
             if len(res.text) < 500 or "查無資料" in res.text:
-                continue
+                continue # 沒資料就換下一天
 
             dfs = pd.read_html(StringIO(res.text))
-            if not dfs: continue # 沒表格，找前一天
+            if not dfs: continue
             
             df = dfs[0]
             
             df.columns = [str(c).replace(' ', '').replace('*', '') for c in df.columns]
             required_cols = ['到期月份(週別)', '履約價', '買賣權', '未沖銷契約量']
             
-            # 欄位不對，找前一天
             if not all(col in df.columns for col in required_cols): continue
 
-            # --- 成功抓到資料 ---
-            st.toast(f"已載入 {query_date} 的盤後資料", icon="📅") # 提示使用者目前顯示的日期
-            
+            # --- 成功抓到資料，回傳 ---
             df = df[required_cols].copy()
             df.columns = ['Month', 'Strike', 'Type', 'OI']
             df = df[pd.to_numeric(df['Strike'], errors='coerce').notnull()]
@@ -102,12 +100,11 @@ def get_option_data():
             return df
             
         except Exception as e:
-            continue # 發生錯誤，找前一天
+            continue # 發生錯誤就繼續往回找
 
-    st.error("最近 5 天皆無法獲取期交所資料，請檢查連線。")
     return None
 
-# --- 3. 主程式邏輯 (以下完全未改動) ---
+# --- 3. 主程式邏輯 (完全保持原樣) ---
 
 st.title("📊 台指期選擇權(TXO) 支撐壓力戰情室")
 
