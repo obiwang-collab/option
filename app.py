@@ -8,10 +8,10 @@ from io import StringIO
 import calendar
 
 # --- 設定區 ---
-st.set_page_config(layout="wide", page_title="台指期籌碼戰情室")
+st.set_page_config(layout="wide", page_title="台指期籌碼戰情室 (APP最終版)")
 TW_TZ = timezone(timedelta(hours=8)) 
 
-# 手動修正結算日 (2025範例)
+# 手動修正結算日
 MANUAL_SETTLEMENT_FIX = {
     '202501W1': '2025/01/02', 
 }
@@ -45,13 +45,11 @@ def get_settlement_date(contract_code):
     except:
         return "9999/99/99"
 
-@st.cache_data(ttl=60) # 60秒快取，避免頻繁請求
+@st.cache_data(ttl=60)
 def get_realtime_data():
     """取得大盤與期貨報價"""
     taiex, fut = None, None
     ts = int(time.time())
-    
-    # 1. 大盤
     try:
         url = f"https://mis.twse.com.tw/stock/api/getStockInfo.jsp?ex_ch=tse_t00.tw&json=1&delay=0&_={ts}000"
         res = requests.get(url, timeout=2)
@@ -62,7 +60,6 @@ def get_realtime_data():
             if val != '-': taiex = float(val)
     except: pass
 
-    # 2. 期貨 (Yahoo)
     try:
         url = f"https://query1.finance.yahoo.com/v8/finance/chart/WTX=F?interval=1m&range=1d&_={ts}"
         headers = {'User-Agent': 'Mozilla/5.0'}
@@ -74,12 +71,11 @@ def get_realtime_data():
     
     return taiex, fut
 
-@st.cache_data(ttl=300) # 籌碼資料 5 分鐘快取一次即可 (期交所盤中不更新OI)
+@st.cache_data(ttl=300)
 def get_option_data():
     url = "https://www.taifex.com.tw/cht/3/optDailyMarketReport"
     headers = {'User-Agent': 'Mozilla/5.0'}
     
-    # 往回找 5 天
     for i in range(5):
         query_date = (datetime.now(tz=TW_TZ) - timedelta(days=i)).strftime('%Y/%m/%d')
         payload = {
@@ -94,125 +90,162 @@ def get_option_data():
             dfs = pd.read_html(StringIO(res.text))
             df = dfs[0]
             df.columns = [str(c).replace(' ', '').replace('*', '') for c in df.columns]
-            required_cols = ['到期月份(週別)', '履約價', '買賣權', '未沖銷契約量']
+            
+            required_cols = ['到期月份(週別)', '履約價', '買賣權', '未沖銷契約量', '結算價']
             if not all(col in df.columns for col in required_cols): continue
             
             df = df[required_cols].copy()
-            df.columns = ['Month', 'Strike', 'Type', 'OI']
+            df.columns = ['Month', 'Strike', 'Type', 'OI', 'Price'] 
+            
+            # --- 強力資料清洗 (解決抓不到 Call 的問題) ---
+            df = df.dropna(subset=['Type'])
+            df['Type'] = df['Type'].astype(str).str.strip() # 去除空白
+            
+            # 數值轉換
             df['Strike'] = pd.to_numeric(df['Strike'].astype(str).str.replace(',', ''), errors='coerce')
             df['OI'] = pd.to_numeric(df['OI'].astype(str).str.replace(',', ''), errors='coerce').fillna(0)
+            df['Price'] = pd.to_numeric(df['Price'].astype(str).str.replace(',', ''), errors='coerce').fillna(0)
+            
+            # 計算金額
+            df['Amount'] = df['OI'] * df['Price'] * 50
             
             if df['OI'].sum() == 0: continue 
             return df, query_date
         except: continue 
     return None, None
 
-# --- 繪圖函式 (使用 Plotly 繪製龍捲風圖) ---
+# --- 繪圖元件: 龍捲風圖 (Plotly版) ---
 def plot_tornado_chart(df_target, title, spot_price, fut_price):
-    # 資料處理
-    is_call = df_target['Type'].astype(str).str.upper().str.contains('買權|CALL')
-    df_call = df_target[is_call][['Strike', 'OI']].rename(columns={'OI': 'Call_OI'})
-    df_put = df_target[~is_call][['Strike', 'OI']].rename(columns={'OI': 'Put_OI'})
+    # 寬鬆判斷 Call
+    is_call = df_target['Type'].str.contains('買|Call', case=False, na=False)
     
-    # 合併
+    df_call = df_target[is_call][['Strike', 'OI', 'Amount']].rename(columns={'OI': 'Call_OI', 'Amount': 'Call_Amt'})
+    df_put = df_target[~is_call][['Strike', 'OI', 'Amount']].rename(columns={'OI': 'Put_OI', 'Amount': 'Put_Amt'})
+    
     data = pd.merge(df_call, df_put, on='Strike', how='outer').fillna(0).sort_values('Strike')
     
-    # 智慧篩選範圍 (只顯示大量區)
+    # 計算總金額
+    total_put_money = data['Put_Amt'].sum()
+    total_call_money = data['Call_Amt'].sum()
+    
+    # 篩選顯示範圍 (只顯示大量區)
     valid = data[(data['Call_OI'] > 300) | (data['Put_OI'] > 300)]
     if not valid.empty:
         min_s = valid['Strike'].min() - 100
         max_s = valid['Strike'].max() + 100
         data = data[(data['Strike'] >= min_s) & (data['Strike'] <= max_s)]
     
-    # 開始繪圖
+    # --- 優化文字標籤：只顯示 > 400 的數字 ---
+    data['Put_Text'] = data['Put_OI'].apply(lambda x: str(int(x)) if x > 400 else "")
+    data['Call_Text'] = data['Call_OI'].apply(lambda x: str(int(x)) if x > 400 else "")
+
+    # --- 強制對稱 X 軸 ---
+    max_oi = max(data['Put_OI'].max(), data['Call_OI'].max())
+    x_limit = max_oi * 1.3 # 留空間給文字
+
     fig = go.Figure()
 
-    # 1. Put (左邊，綠色) - 數值轉負才能畫在左邊
+    # Put (左, 綠色)
     fig.add_trace(go.Bar(
-        y=data['Strike'],
-        x=-data['Put_OI'], # 負值
-        orientation='h',
-        name='Put (支撐)',
+        y=data['Strike'], x=-data['Put_OI'], orientation='h', name='Put (支撐)',
         marker_color='#2ca02c',
-        text=data['Put_OI'], # 顯示正值文字
-        textposition='outside',
-        hovertemplate='履約價: %{y}<br>Put OI: %{text}<extra></extra>'
+        text=data['Put_Text'], textposition='outside', # 使用過濾後的文字
+        customdata=data['Put_Amt'] / 100000000, 
+        hovertemplate='<b>履約價: %{y}</b><br>Put OI: %{x}<br>Put 市值: %{customdata:.2f}億<extra></extra>'
     ))
 
-    # 2. Call (右邊，紅色)
+    # Call (右, 紅色)
     fig.add_trace(go.Bar(
-        y=data['Strike'],
-        x=data['Call_OI'],
-        orientation='h',
-        name='Call (壓力)',
+        y=data['Strike'], x=data['Call_OI'], orientation='h', name='Call (壓力)',
         marker_color='#d62728',
-        text=data['Call_OI'],
-        textposition='outside',
-        hovertemplate='履約價: %{y}<br>Call OI: %{x}<extra></extra>'
+        text=data['Call_Text'], textposition='outside',
+        customdata=data['Call_Amt'] / 100000000,
+        hovertemplate='<b>履約價: %{y}</b><br>Call OI: %{x}<br>Call 市值: %{customdata:.2f}億<extra></extra>'
     ))
 
-    # 3. 價格線
+    # 價格線
     if spot_price:
         fig.add_hline(y=spot_price, line_dash="dash", line_color="#ff7f0e", annotation_text=f"現貨 {int(spot_price)}", annotation_position="top right")
     if fut_price:
         fig.add_hline(y=fut_price, line_dash="dashdot", line_color="blue", annotation_text=f"期貨 {int(fut_price)}", annotation_position="bottom right")
 
-    # 4. 版面設定
     fig.update_layout(
         title=dict(text=title, x=0.5),
         xaxis=dict(
             title='未平倉量 (OI)',
+            range=[-x_limit, x_limit], # 強制對稱
             showgrid=True,
-            zeroline=True,
-            zerolinewidth=2,
-            zerolinecolor='black',
-            # 隱藏負號的 X 軸刻度
+            zeroline=True, zerolinewidth=2, zerolinecolor='black',
+            # 自定義刻度顯示 (把負號拿掉)
             tickmode='array',
-            tickvals=[-3000, -2000, -1000, 0, 1000, 2000, 3000], # 範例刻度
-            ticktext=['3k', '2k', '1k', '0', '1k', '2k', '3k']
+            tickvals=[-x_limit*0.75, -x_limit*0.5, -x_limit*0.25, 0, x_limit*0.25, x_limit*0.5, x_limit*0.75],
+            ticktext=[f"{int(x_limit*0.75)}", f"{int(x_limit*0.5)}", f"{int(x_limit*0.25)}", "0", 
+                      f"{int(x_limit*0.25)}", f"{int(x_limit*0.5)}", f"{int(x_limit*0.75)}"]
         ),
         yaxis=dict(
-            title='履約價',
-            tickmode='linear',
-            dtick=100 if len(data) < 20 else 200 # 根據資料量調整刻度密度
+            title='履約價', 
+            tickmode='linear', 
+            dtick=200 # 強制每隔 200 點顯示一個刻度，避免擁擠
         ),
-        barmode='overlay', # 其實分開畫更好，但 overlay 配合正負值會自動變 butterfly
-        showlegend=True,
-        legend=dict(orientation="h", y=1.02, x=0.3),
-        height=600, # 高度
-        margin=dict(l=20, r=20, t=50, b=20)
+        barmode='overlay',
+        legend=dict(orientation="h", y=1.05, x=0.3),
+        height=700, # 拉高圖表
+        margin=dict(l=40, r=40, t=80, b=40),
+        
+        # --- 顯示總金額的框框 (Annotations) ---
+        annotations=[
+            # 左上角 Put 金額
+            dict(
+                x=0.02, y=1.02, xref="paper", yref="paper",
+                text=f"<b>Put 總金額</b><br>{total_put_money/100000000:.1f} 億",
+                showarrow=False, align="left",
+                bgcolor="white", bordercolor="#2ca02c", borderwidth=2,
+                font=dict(size=14, color="#2ca02c")
+            ),
+            # 右上角 Call 金額
+            dict(
+                x=0.98, y=1.02, xref="paper", yref="paper",
+                text=f"<b>Call 總金額</b><br>{total_call_money/100000000:.1f} 億",
+                showarrow=False, align="right",
+                bgcolor="white", bordercolor="#d62728", borderwidth=2,
+                font=dict(size=14, color="#d62728")
+            )
+        ]
     )
-    
     return fig
 
 # --- 主程式 ---
 def main():
-    st.title("📊 台指期選擇權籌碼監控 (龍捲風圖版)")
+    st.title("📊 台指期選擇權籌碼戰情室 (APP最終版)")
 
-    # 側邊欄重新整理
-    if st.sidebar.button("🔄 重新整理數據"):
+    if st.sidebar.button("🔄 重新整理"):
         st.cache_data.clear()
         st.rerun()
 
-    # 1. 取得資料
-    with st.spinner('正在從期交所抓取資料...'):
+    with st.spinner('計算籌碼金額中...'):
         df, data_date = get_option_data()
         taiex_now, fut_now = get_realtime_data()
 
     if df is None:
-        st.error("無法取得期交所資料，請稍後再試。")
+        st.error("查無資料，請稍後再試")
         return
 
-    # 顯示即時報價
-    col1, col2, col3 = st.columns(3)
-    col1.metric("資料日期", data_date)
-    col2.metric("加權指數 (現貨)", f"{int(taiex_now)}" if taiex_now else "N/A")
-    col3.metric("台指期 (期貨)", f"{int(fut_now)}" if fut_now else "N/A", 
-                delta=f"{int(fut_now - taiex_now)}" if (fut_now and taiex_now) else None)
+    # 計算全市場數據
+    total_call_amt = df[df['Type'].str.contains('買|Call', case=False, na=False)]['Amount'].sum()
+    total_put_amt = df[df['Type'].str.contains('賣|Put', case=False, na=False)]['Amount'].sum()
+    pc_ratio_amt = (total_put_amt / total_call_amt) * 100 if total_call_amt > 0 else 0
 
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("資料日期", data_date)
+    c2.metric("現貨 / 期貨", f"{int(taiex_now) if taiex_now else 'N/A'} / {int(fut_now) if fut_now else 'N/A'}")
+    
+    trend = "偏多" if pc_ratio_amt > 100 else "偏空"
+    trend_color = "normal" if pc_ratio_amt > 100 else "inverse"
+    c3.metric("P/C 金額比 (市值)", f"{pc_ratio_amt:.1f}%", f"{trend}格局", delta_color=trend_color)
+    c4.metric("全市場總市值", f"{(total_call_amt+total_put_amt)/100000000:.1f} 億")
+    
     st.markdown("---")
 
-    # 2. 篩選合約
     unique_months = df['Month'].unique()
     contracts = []
     for m in unique_months:
@@ -223,34 +256,34 @@ def main():
     
     targets = []
     if contracts:
-        targets.append({'type': '🔥 本週結算', 'info': contracts[0]}) # 週選
-        
+        targets.append({'type': '🔥 本週結算', 'info': contracts[0]})
         monthly = next((c for c in contracts if len(c['code']) == 6), None)
         if monthly and monthly['code'] != contracts[0]['code']:
-            targets.append({'type': '📅 當月結算', 'info': monthly}) # 月選
+            targets.append({'type': '📅 當月結算', 'info': monthly})
         elif monthly:
              next_monthly = next((c for c in contracts if len(c['code']) == 6 and c['code'] != monthly['code']), None)
              if next_monthly:
                  targets.append({'type': '📅 次月結算', 'info': next_monthly})
 
-    # 3. 左右並排顯示
     if not targets:
-        st.warning("目前無可顯示的合約數據。")
+        st.warning("無合約資料")
         return
 
-    # 建立左右兩欄
+    # 左右並排顯示
     cols = st.columns(len(targets))
-    
     for i, target in enumerate(targets):
         with cols[i]:
             m_code = target['info']['code']
             s_date = target['info']['date']
-            title = f"{target['type']} ({m_code}) - 結算: {s_date}"
             
-            # 過濾該合約資料
+            # 取得該合約的 P/C Ratio
             df_target = df[df['Month'] == m_code]
+            sub_call = df_target[df_target['Type'].str.contains('Call|買', case=False, na=False)]['Amount'].sum()
+            sub_put = df_target[df_target['Type'].str.contains('Put|賣', case=False, na=False)]['Amount'].sum()
+            sub_ratio = (sub_put / sub_call * 100) if sub_call > 0 else 0
             
-            # 繪圖
+            title = f"{target['type']} ({m_code}) - P/C金額比: {sub_ratio:.1f}%"
+            
             fig = plot_tornado_chart(df_target, title, taiex_now, fut_now)
             st.plotly_chart(fig, use_container_width=True)
 
