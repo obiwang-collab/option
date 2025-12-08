@@ -108,11 +108,27 @@ def get_option_data():
             type_col = next((c for c in df.columns if '買賣' in c), None)
             oi_col = next((c for c in df.columns if '未沖銷' in c or 'OI' in c), None)
             price_col = next((c for c in df.columns if '結算' in c or '收盤' in c or 'Price' in c), None)
+            # --- 新增抓取成交量 ---
+            vol_col = next((c for c in df.columns if '成交量' in c or 'Volume' in c), None)
 
             if not all([month_col, strike_col, type_col, oi_col, price_col]): continue
 
-            df = df.rename(columns={month_col:'Month', strike_col:'Strike', type_col:'Type', oi_col:'OI', price_col:'Price'})
-            df = df[['Month', 'Strike', 'Type', 'OI', 'Price']].copy()
+            # 重新命名欄位 (包含 Volume)
+            rename_dict = {
+                month_col:'Month', strike_col:'Strike', type_col:'Type', 
+                oi_col:'OI', price_col:'Price'
+            }
+            if vol_col:
+                rename_dict[vol_col] = 'Volume'
+            
+            df = df.rename(columns=rename_dict)
+            
+            # 確保選擇的欄位存在
+            cols_to_keep = ['Month', 'Strike', 'Type', 'OI', 'Price']
+            if 'Volume' in df.columns:
+                cols_to_keep.append('Volume')
+                
+            df = df[cols_to_keep].copy()
             
             df = df.dropna(subset=['Type'])
             df['Type'] = df['Type'].astype(str).str.strip()
@@ -122,6 +138,9 @@ def get_option_data():
             df['Price'] = df['Price'].astype(str).str.replace(',', '').replace('-', '0')
             df['Price'] = pd.to_numeric(df['Price'], errors='coerce').fillna(0)
             
+            if 'Volume' in df.columns:
+                df['Volume'] = pd.to_numeric(df['Volume'].astype(str).str.replace(',', ''), errors='coerce').fillna(0)
+            
             df['Amount'] = df['OI'] * df['Price'] * 50
             
             if df['OI'].sum() == 0: continue 
@@ -129,7 +148,7 @@ def get_option_data():
         except: continue 
     return None, None
 
-# --- 繪圖元件 (修正：標題三行顯示，邊距加大) ---
+# --- 繪圖元件 (聚焦範圍 ±1200) ---
 def plot_tornado_chart(df_target, title_text, spot_price):
     is_call = df_target['Type'].str.contains('買|Call', case=False, na=False)
     
@@ -141,7 +160,7 @@ def plot_tornado_chart(df_target, title_text, spot_price):
     total_put_money = data['Put_Amt'].sum()
     total_call_money = data['Call_Amt'].sum()
     
-    # 1. 基礎篩選
+    # 1. 基礎篩選 (只為了繪圖美觀，不影響下載)
     data = data[(data['Call_OI'] > 300) | (data['Put_OI'] > 300)]
     
     # 2. 聚焦範圍邏輯 (±1200點)
@@ -157,6 +176,7 @@ def plot_tornado_chart(df_target, title_text, spot_price):
     if center_price > 0:
         min_s = center_price - FOCUS_RANGE
         max_s = center_price + FOCUS_RANGE
+        # 這裡只裁切「繪圖用」的 data，不影響原始 df
         data = data[(data['Strike'] >= min_s) & (data['Strike'] <= max_s)]
     
     max_oi = max(data['Put_OI'].max(), data['Call_OI'].max()) if not data.empty else 1000
@@ -182,7 +202,7 @@ def plot_tornado_chart(df_target, title_text, spot_price):
 
     annotations = []
     
-    # 畫線 & 右側標籤
+    # 畫線
     if spot_price and spot_price > 0:
         if not data.empty and data['Strike'].min() <= spot_price <= data['Strike'].max():
             fig.add_hline(y=spot_price, line_dash="dash", line_color="#ff7f0e", line_width=2)
@@ -232,7 +252,6 @@ def plot_tornado_chart(df_target, title_text, spot_price):
         barmode='overlay',
         legend=dict(orientation="h", y=-0.1, x=0.5, xanchor="center"),
         height=750,
-        # --- 關鍵修正：將頂部邊距 (t) 加大至 140，容納三行標題 ---
         margin=dict(l=40, r=80, t=140, b=60), 
         annotations=annotations,
         paper_bgcolor='white',
@@ -256,78 +275,7 @@ def main():
         st.error("查無資料，請稍後再試")
         return
 
-    total_call_amt = df[df['Type'].str.contains('買|Call', case=False, na=False)]['Amount'].sum()
-    total_put_amt = df[df['Type'].str.contains('賣|Put', case=False, na=False)]['Amount'].sum()
-    pc_ratio_amt = (total_put_amt / total_call_amt) * 100 if total_call_amt > 0 else 0
-
-    c1, c2, c3, c4 = st.columns([1.2, 0.8, 1, 1])
-    current_time_str = datetime.now(tz=TW_TZ).strftime('%Y/%m/%d %H:%M:%S')
-    
-    c1.markdown(f"""
-        <div style="text-align: left;">
-            <span style="font-size: 14px; color: #555;">製圖時間</span><br>
-            <span style="font-size: 18px; font-weight: bold;">{current_time_str}</span>
-        </div>
-    """, unsafe_allow_html=True)
-    
-    c2.metric("大盤現貨", f"{int(taiex_now) if taiex_now else 'N/A'}")
-    
-    trend = "偏多" if pc_ratio_amt > 100 else "偏空"
-    trend_color = "normal" if pc_ratio_amt > 100 else "inverse"
-    c3.metric("全市場 P/C 金額比", f"{pc_ratio_amt:.1f}%", f"{trend}格局", delta_color=trend_color)
-    c4.metric("資料來源日期", data_date)
-    
-    st.markdown("---")
-
-    unique_codes = df['Month'].unique()
-    all_contracts = []
-    
-    for code in unique_codes:
-        s_date_str = get_settlement_date(code)
-        if s_date_str == "9999/99/99": continue
-        if s_date_str > data_date: 
-            all_contracts.append({'code': code, 'date': s_date_str})
-    
-    all_contracts.sort(key=lambda x: x['date'])
-    
-    if not all_contracts:
-        st.warning("無未來合約數據")
-        return
-
-    plot_targets = []
-    nearest = all_contracts[0]
-    plot_targets.append({'title': '最近結算', 'info': nearest})
-    
-    monthly = next((c for c in all_contracts if len(c['code']) == 6), None)
-    if monthly:
-        if monthly['code'] != nearest['code']:
-            plot_targets.append({'title': '當月月選', 'info': monthly})
-        else:
-             plot_targets[0]['title'] = '最近結算 (同月選)'
-
-    cols = st.columns(len(plot_targets))
-    
-    for i, target in enumerate(plot_targets):
-        with cols[i]:
-            m_code = target['info']['code']
-            s_date = target['info']['date']
-            c_title = target['title']
-            
-            df_target = df[df['Month'] == m_code]
-            sub_call = df_target[df_target['Type'].str.contains('Call|買', case=False, na=False)]['Amount'].sum()
-            sub_put = df_target[df_target['Type'].str.contains('Put|賣', case=False, na=False)]['Amount'].sum()
-            sub_ratio = (sub_put / sub_call * 100) if sub_call > 0 else 0
-            sub_status = "偏多" if sub_ratio > 100 else "偏空"
-            
-            # --- 關鍵修正：組合三行標題文字 ---
-            title_text = (
-                f"<b>【{c_title}】 {m_code}</b><br>"
-                f"<span style='font-size: 14px;'>結算: {s_date}</span><br>"
-                f"<span style='font-size: 14px;'>P/C金額比: {sub_ratio:.1f}% ({sub_status})</span>"
-            )
-            
-            fig = plot_tornado_chart(df_target, title_text, taiex_now)
-            st.plotly_chart(fig, use_container_width=True)
-
-if __name__ == "__main__":
-    main()
+    # --- 關鍵修正：確保這裡下載的是「完整原始 df」 ---
+    # 此時的 df 包含所有履約價、所有月份，完全沒有被裁切
+    # 我還多加入了 Volume (成交量) 欄位
+    csv = df.to_csv(index=False).encode('utf-8-
