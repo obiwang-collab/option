@@ -53,9 +53,21 @@ def get_settlement_date(contract_code):
 
 @st.cache_data(ttl=60)
 def get_realtime_data():
-    """取得大盤與期貨"""
+    """取得大盤與期貨 (含備援機制)"""
     taiex, fut = None, None
     ts = int(time.time())
+    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'}
+
+    # 1. 嘗試抓取期貨 (Yahoo)
+    try:
+        url = f"https://query1.finance.yahoo.com/v8/finance/chart/WTX=F?interval=1m&range=1d&_={ts}"
+        res = requests.get(url, headers=headers, timeout=3)
+        data = res.json()
+        price = data['chart']['result'][0]['meta'].get('regularMarketPrice')
+        if price: fut = float(price)
+    except: pass
+
+    # 2. 嘗試抓取現貨 (優先: 證交所 API)
     try:
         url = f"https://mis.twse.com.tw/stock/api/getStockInfo.jsp?ex_ch=tse_t00.tw&json=1&delay=0&_={ts}000"
         res = requests.get(url, timeout=2)
@@ -66,14 +78,16 @@ def get_realtime_data():
             if val != '-': taiex = float(val)
     except: pass
 
-    try:
-        url = f"https://query1.finance.yahoo.com/v8/finance/chart/WTX=F?interval=1m&range=1d&_={ts}"
-        headers = {'User-Agent': 'Mozilla/5.0'}
-        res = requests.get(url, headers=headers, timeout=3)
-        data = res.json()
-        price = data['chart']['result'][0]['meta'].get('regularMarketPrice')
-        if price: fut = float(price)
-    except: pass
+    # 3. 如果證交所失敗，備援抓取現貨 (Yahoo ^TWII)
+    if taiex is None:
+        try:
+            url = f"https://query1.finance.yahoo.com/v8/finance/chart/%5ETWII?interval=1m&range=1d&_={ts}"
+            res = requests.get(url, headers=headers, timeout=3)
+            data = res.json()
+            price = data['chart']['result'][0]['meta'].get('regularMarketPrice')
+            if price: taiex = float(price)
+        except: pass
+        
     return taiex, fut
 
 @st.cache_data(ttl=300)
@@ -124,7 +138,7 @@ def get_option_data():
         except: continue 
     return None, None
 
-# --- 繪圖元件 (修正版：Y軸強制顯示完整整數，無K縮寫) ---
+# --- 繪圖元件 (修正：Y軸強制整數，現貨線邏輯優化) ---
 def plot_tornado_chart(df_target, title_text, spot_price, fut_price):
     is_call = df_target['Type'].str.contains('買|Call', case=False, na=False)
     
@@ -136,11 +150,21 @@ def plot_tornado_chart(df_target, title_text, spot_price, fut_price):
     total_put_money = data['Put_Amt'].sum()
     total_call_money = data['Call_Amt'].sum()
     
+    # 智慧篩選範圍，但保留足夠寬度顯示現貨線
     valid = data[(data['Call_OI'] > 300) | (data['Put_OI'] > 300)]
+    
+    min_s, max_s = 0, 99999
     if not valid.empty:
-        min_s = valid['Strike'].min() - 100
-        max_s = valid['Strike'].max() + 100
-        data = data[(data['Strike'] >= min_s) & (data['Strike'] <= max_s)]
+        min_s = valid['Strike'].min() - 200
+        max_s = valid['Strike'].max() + 200
+        
+    # 如果有現貨價格，確保範圍包含現貨，不然線會畫在圖外
+    if spot_price:
+        min_s = min(min_s, spot_price - 200)
+        max_s = max(max_s, spot_price + 200)
+
+    # 最終過濾
+    data = data[(data['Strike'] >= min_s) & (data['Strike'] <= max_s)]
     
     max_oi = max(data['Put_OI'].max(), data['Call_OI'].max()) if not data.empty else 1000
     x_limit = max_oi * 1.1
@@ -166,7 +190,7 @@ def plot_tornado_chart(df_target, title_text, spot_price, fut_price):
     annotations = []
     
     # 畫線 & 右側標籤
-    if spot_price:
+    if spot_price and spot_price > 0:
         fig.add_hline(y=spot_price, line_dash="dash", line_color="#ff7f0e", line_width=2)
         annotations.append(dict(
             x=1, y=spot_price, xref="paper", yref="y",
@@ -176,7 +200,7 @@ def plot_tornado_chart(df_target, title_text, spot_price, fut_price):
             bgcolor="#ff7f0e", bordercolor="#ff7f0e", borderpad=4
         ))
 
-    if fut_price:
+    if fut_price and fut_price > 0:
         fig.add_hline(y=fut_price, line_dash="dashdot", line_color="blue", line_width=2)
         annotations.append(dict(
             x=1, y=fut_price, xref="paper", yref="y",
@@ -220,7 +244,7 @@ def plot_tornado_chart(df_target, title_text, spot_price, fut_price):
             ticktext=[f"{int(x_limit*0.75)}", f"{int(x_limit*0.5)}", f"{int(x_limit*0.25)}", "0", 
                       f"{int(x_limit*0.25)}", f"{int(x_limit*0.5)}", f"{int(x_limit*0.75)}"]
         ),
-        # --- 關鍵修正：tickformat='d' 強制顯示整數，不縮寫成 k ---
+        # --- 關鍵修正：tickformat='d' 強制顯示整數，不會縮寫成 k ---
         yaxis=dict(title='履約價', tickmode='linear', dtick=200, tickformat='d'),
         # -----------------------------------------------------
         barmode='overlay',
