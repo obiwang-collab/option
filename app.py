@@ -59,45 +59,63 @@ def get_settlement_date(contract_code):
 
 def get_realtime_taiex():
     """
-    更新版：改用 Yahoo Finance 'Quote' API (報價接口)
-    優點：比 Chart API 更即時，延遲通常在 1 分鐘內
+    終極版：使用 Yahoo Chart API 抓取【1分鐘線圖】的【最後一筆數據】
+    解決了 Meta Data 延遲的問題，也避開了 Quote API 被擋的問題
     """
     ts = int(time.time())
-    # 改用 v7/finance/quote 接口
-    url = f"https://query1.finance.yahoo.com/v7/finance/quote?symbols=%5ETWII&_={ts}"
+    # 關鍵：interval=1m (每分鐘資料), range=1d, includePrePost=false
+    url = f"https://query1.finance.yahoo.com/v8/finance/chart/%5ETWII?interval=1m&range=1d&includePrePost=false&_={ts}"
     
     headers = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
     }
     
     try:
-        res = requests.get(url, headers=headers, timeout=3)
+        res = requests.get(url, headers=headers, timeout=5)
         data = res.json()
         
-        # 解析 Quote API 的 JSON 結構
-        if 'quoteResponse' in data and 'result' in data['quoteResponse']:
-            result = data['quoteResponse']['result']
-            if len(result) > 0:
-                info = result[0]
+        if 'chart' in data and 'result' in data['chart']:
+            result = data['chart']['result'][0]
+            meta = result['meta']
+            
+            # 1. 嘗試直接從最後一筆 tick 拿資料 (最準確)
+            if 'timestamp' in result and 'indicators' in result:
+                timestamps = result['timestamp']
+                quotes = result['indicators']['quote'][0]
                 
-                current = info.get('regularMarketPrice')
-                change = info.get('regularMarketChange')
-                percent = info.get('regularMarketChangePercent')
-                timestamp = info.get('regularMarketTime')
-                
-                if timestamp:
-                    time_str = datetime.fromtimestamp(timestamp, tz=TW_TZ).strftime('%Y-%m-%d %H:%M:%S')
-                else:
-                    time_str = datetime.now(tz=TW_TZ).strftime('%Y-%m-%d %H:%M:%S')
-
-                if current is not None:
-                    # 如果 change 是 None (有時會發生)，自己算
-                    if change is None and 'regularMarketPreviousClose' in info:
-                         prev = info['regularMarketPreviousClose']
-                         change = current - prev
-                         percent = (change / prev) * 100
+                if timestamps and quotes and 'close' in quotes:
+                    # 找到最後一個非 None 的收盤價
+                    closes = quotes['close']
+                    valid_idx = -1
+                    for i in range(len(closes)-1, -1, -1):
+                        if closes[i] is not None:
+                            valid_idx = i
+                            break
                     
-                    return current, change, percent, time_str
+                    if valid_idx != -1:
+                        current_price = closes[valid_idx]
+                        last_time = timestamps[valid_idx]
+                        prev_close = meta.get('chartPreviousClose')
+                        
+                        time_str = datetime.fromtimestamp(last_time, tz=TW_TZ).strftime('%Y-%m-%d %H:%M:%S')
+                        
+                        if prev_close:
+                            diff = current_price - prev_close
+                            percent = (diff / prev_close) * 100
+                            return current_price, diff, percent, time_str
+
+            # 2. 如果上面失敗，降級使用 meta 資料 (雖然可能有延遲，總比沒有好)
+            current = meta.get('regularMarketPrice')
+            prev = meta.get('chartPreviousClose')
+            timestamp = meta.get('regularMarketTime')
+            
+            time_str = datetime.now(tz=TW_TZ).strftime('%Y-%m-%d %H:%M:%S')
+            if timestamp:
+                time_str = datetime.fromtimestamp(timestamp, tz=TW_TZ).strftime('%Y-%m-%d %H:%M:%S')
+
+            if current and prev:
+                return current, current - prev, (current - prev)/prev * 100, time_str
+
     except Exception as e:
         pass
         
