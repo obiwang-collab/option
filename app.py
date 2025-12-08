@@ -8,7 +8,7 @@ from datetime import datetime, timedelta
 from io import StringIO
 import matplotlib.font_manager as fm
 import os
-import time # 新增 time 模組
+import time
 
 # --- 1. 網頁設定 ---
 st.set_page_config(
@@ -56,10 +56,11 @@ def get_settlement_date(contract_code):
 
 def get_realtime_taiex():
     """
-    從證交所 MIS 抓取即時大盤指數
+    修改版：改從 Yahoo Finance 抓取即時大盤指數 (^TWII)
+    原因：證交所 MIS 網站會擋 Streamlit Cloud 的 IP
     """
-    ts = int(time.time() * 1000)
-    url = f"https://mis.twse.com.tw/stock/api/getStockInfo.jsp?ex_ch=tse_t00.tw&json=1&delay=0&_={ts}"
+    # Yahoo Finance 的公開 API 網址
+    url = "https://query1.finance.yahoo.com/v8/finance/chart/%5ETWII?interval=1d"
     
     headers = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
@@ -69,26 +70,23 @@ def get_realtime_taiex():
         res = requests.get(url, headers=headers, timeout=5)
         data = res.json()
         
-        if 'msgArray' in data and len(data['msgArray']) > 0:
-            info = data['msgArray'][0]
+        # 解析 Yahoo 回傳的 JSON 結構
+        if 'chart' in data and 'result' in data['chart']:
+            meta = data['chart']['result'][0]['meta']
             
-            # z = 當盤成交價, y = 昨日收盤價
-            current_price = info.get('z', '-')
-            yesterday_close = info.get('y', '-')
+            # regularMarketPrice = 目前價格 (或收盤價)
+            # chartPreviousClose = 昨日收盤價
+            current_price = meta.get('regularMarketPrice')
+            previous_close = meta.get('chartPreviousClose')
             
-            if current_price == '-' or current_price == '':
-                current_price = info.get('o', yesterday_close)
-
-            try:
-                cur_val = float(current_price)
-                y_val = float(yesterday_close)
-                diff = cur_val - y_val
-                percent = (diff / y_val) * 100
-                return cur_val, diff, percent
-            except:
-                return None, None, None
-    except:
+            if current_price and previous_close:
+                diff = current_price - previous_close
+                percent = (diff / previous_close) * 100
+                return current_price, diff, percent
+                
+    except Exception as e:
         pass
+        # print(f"Yahoo抓取失敗: {e}") 
     
     return None, None, None
 
@@ -100,6 +98,7 @@ def get_option_data():
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
     }
 
+    # 嘗試往回找 5 天
     for i in range(5):
         query_date = (datetime.now() - timedelta(days=i)).strftime('%Y/%m/%d')
         
@@ -126,6 +125,7 @@ def get_option_data():
             
             if not all(col in df.columns for col in required_cols): continue
 
+            # --- 處理千分位逗號 ---
             df = df[required_cols].copy()
             df.columns = ['Month', 'Strike', 'Type', 'OI']
             
@@ -151,17 +151,15 @@ st.title("📊 台指期選擇權(TXO) 支撐壓力戰情室")
 
 with st.sidebar:
     st.write("### 功能選單")
-    # 這裡的刷新按鈕現在也會刷新大盤指數
     if st.button("🔄 刷新即時數據", type="primary"):
         st.cache_data.clear()
         st.session_state['refresh'] = True
 
 if True:
-    # 1. 先抓盤後籌碼 (有快取)
-    with st.spinner('讀取資料中...'):
+    with st.spinner('連線資料源中...'):
+        # 1. 抓盤後籌碼
         df, data_date = get_option_data()
-        
-        # 2. 抓取即時大盤 (不使用快取，或者快取極短，這裡直接呼叫)
+        # 2. 抓 Yahoo 即時大盤
         taiex_now, taiex_diff, taiex_pct = get_realtime_taiex()
 
     # --- 顯示大盤指數區塊 ---
@@ -172,13 +170,13 @@ if True:
         with c2:
             st.caption(f"盤後籌碼日期：{data_date}")
         with c3:
-            st.caption("指數來源：TWSE MIS (即時)")
-        st.divider() # 畫一條分隔線
+            st.caption("指數來源：Yahoo Finance (雲端適用)")
+        st.divider() 
     else:
-        st.warning("⚠️ 無法連線至證交所獲取即時大盤，僅顯示盤後籌碼。")
+        st.warning("⚠️ 無法獲取即時大盤 (Yahoo Finance 連線失敗)，僅顯示盤後籌碼。")
 
     if df is None or df.empty:
-        st.warning("⚠️ 最近 5 天查無有效選擇權合約資料。")
+        st.warning("⚠️ 最近 5 天查無有效合約資料。")
     else:
         all_months = df['Month'].unique()
         dataset_list = []
@@ -186,6 +184,7 @@ if True:
         for month in all_months:
             s_date = get_settlement_date(month)
             
+            # 過濾已結算合約
             if s_date <= data_date:
                 continue
             
@@ -202,7 +201,7 @@ if True:
                 dataset_list.append({'month': month, 'data': df_show, 'settle_date': s_date})
         
         if not dataset_list:
-            st.info("無有效合約資料。")
+            st.info("無有效合約資料 (所有合約皆已結算或無量)。")
         else:
             valid_datasets = sorted(dataset_list, key=lambda x: x['settle_date'])
 
@@ -225,7 +224,6 @@ if True:
                 plt.rcParams['font.sans-serif'] = ['Microsoft JhengHei', 'Microsoft JhengHei UI', 'SimHei']
                 plt.rcParams['axes.unicode_minus'] = False 
 
-            # 在標題中也顯示大盤
             if taiex_now:
                 full_title = f"TXO 籌碼分佈 vs 大盤：{int(taiex_now)}  [數據日期：{data_date}]"
             else:
@@ -253,7 +251,7 @@ if True:
                 ax.bar(strikes + bw/2, c_oi, width=bw, color=call_color, alpha=0.85, label='Call (壓力)')
                 ax.bar(strikes - bw/2, p_oi, width=bw, color=put_color, alpha=0.85, label='Put (支撐)')
                 
-                # --- 新增功能：畫出大盤目前位置的虛線 ---
+                # --- 畫出大盤目前位置的虛線 ---
                 if taiex_now:
                     ax.axvline(x=taiex_now, color='#ff9900', linestyle='--', linewidth=2, label=f'大盤 ({int(taiex_now)})')
 
