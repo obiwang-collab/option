@@ -55,7 +55,7 @@ openai_client = get_openai_client(OPENAI_KEY)
 MANUAL_SETTLEMENT_FIX = {'202501W1': '2025/01/02'}
 
 
-# ⭐⭐⭐ AdSense / GA 最終整合代碼區塊 (修正 Meta 標記嵌入) ⭐⭐⭐
+# ⭐⭐⭐ AdSense / GA 最終整合代碼區塊 (Meta 標記驗證) ⭐⭐⭐
 
 # 1. 您的 AdSense 發布商 ID
 ADSENSE_PUB_ID = 'ca-pub-4585150092118682'
@@ -286,7 +286,7 @@ def plot_tornado_chart(df_target, title_text, spot_price):
 
     fig.update_layout(
         title=dict(text=title_text, y=0.95, x=0.5, xanchor='center', yanchor='top', font=dict(size=20, color="black")), 
-        xaxis=dict(title='未平倉量 (OI)', range=[-x_limit, x_limit], showgrid=True, zeroline=True, zerolinewidth=2, zerolinecolor='black', tickmode='array', tickvals=[-x_limit*0.75, -x_limit*0.5, -x_limit*0.25, 0, x_limit*0.25, x_limit*0.5, x_limit*0.75], ticktext=[f"{int(x_limit*0.75)}", f"{int(x_limit*0.75)}", f"{int(x_limit*0.25)}", "0", f"{int(x_limit*0.25)}", f"{int(x_limit*0.75)}", f"{int(x_limit*0.75)}"]), 
+        xaxis=dict(title='未平倉量 (OI)', range=[-x_limit, x_limit], showgrid=True, zeroline=True, zerolinewidth=2, zerolinecolor='black', tickmode='array', tickvals=[-x_limit*0.75, -x_limit*0.5, -x_limit*0.25, 0, x_limit*0.25, x_limit*0.5, x_limit*0.75], ticktext=[f"{int(x_limit*0.75)}", f"{int(x_limit*0.75)}", f"{int(x_limit*0.25)}", "0", f"{int(x_limit*0.25)}", f"{int(x_limit*0.5)}", f"{int(x_limit*0.75)}"]), 
         yaxis=dict(title='履約價', tickmode='linear', dtick=100, tickformat='d'), 
         barmode='overlay', 
         legend=dict(orientation="h", y=-0.1, x=0.5, xanchor="center"), 
