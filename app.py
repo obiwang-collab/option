@@ -466,7 +466,7 @@ def main():
         start_countdown = st.button("點此開始倒數計時 (解鎖分析)", key="start_timer", type="secondary")
         
         if start_countdown:
-            # ✅ 修正 SyntaxError: 確保 placeholder 賦值完整
+            # ✅ 這是位於第 576 行的修正處，確保賦值完整
             placeholder = st.empty() 
             wait_time = 8 
             
