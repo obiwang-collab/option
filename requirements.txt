@@ -1,6 +1,10 @@
 streamlit
 pandas
+numpy
+scipy
 plotly
 requests
 google-generativeai
+openai
 lxml
+html5lib
