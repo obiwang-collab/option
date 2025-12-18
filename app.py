@@ -490,7 +490,17 @@ def plot_tornado_chart(df_target, title_text, spot_price):
         yanchor="top"
     )
     
-    fig.update_layout(title=dict(text=title_text, x=0.5), xaxis=dict(range=[-x_limit, x_limit]), barmode='overlay', height=750)
+    # 🔥 Y軸格式化: 完整數字 + 千分位逗號
+    fig.update_layout(
+        title=dict(text=title_text, x=0.5), 
+        xaxis=dict(range=[-x_limit, x_limit]), 
+        yaxis=dict(
+            tickformat=",",  # 加上千分位逗號
+            separatethousands=True  # 啟用千分位分隔
+        ),
+        barmode='overlay', 
+        height=750
+    )
     return fig
 
 def plot_gex_chart(gex_df, spot_price):
