@@ -270,7 +270,7 @@ def get_available_contracts():
     url = "https://www.taifex.com.tw/cht/3/optDailyMarketReport"
     headers = {'User-Agent': 'Mozilla/5.0'}
     
-    for i in range(5):  # 只回溯5天,加快速度
+    for i in range(10):  # 回溯10天,提高成功率
         target_date = datetime.now(tz=TW_TZ) - timedelta(days=i)
         query_date = target_date.strftime('%Y/%m/%d')
         payload = {
@@ -295,20 +295,27 @@ def get_available_contracts():
                 
             df = dfs[0]
             
-            # 找到月份/週別欄位
+            # 🔥 改進:找到月份/週別欄位 - 使用第一個欄位作為備選
             month_col = None
             for col in df.columns:
                 col_str = str(col).strip()
-                if '到期月份' in col_str or '週別' in col_str or col_str == '契約':
+                # 更寬鬆的條件
+                if any(keyword in col_str for keyword in ['到期月份', '週別', '契約', '月份']):
                     month_col = col
                     break
+            
+            # 如果都找不到,就用第一個欄位
+            if month_col is None and len(df.columns) > 0:
+                month_col = df.columns[0]
             
             if month_col is None:
                 continue
             
-            # 提取所有合約代碼
+            # 提取所有合約代碼 - 更寬鬆的過濾
             contracts = df[month_col].dropna().unique()
-            contracts = [str(c).strip() for c in contracts if len(str(c)) >= 6]
+            contracts = [str(c).strip().upper() for c in contracts 
+                        if len(str(c).strip()) >= 6 and 
+                        any(char.isdigit() for char in str(c))]  # 確保包含數字
             
             if contracts:
                 # 計算結算日期並排序
@@ -317,7 +324,8 @@ def get_available_contracts():
                 
                 for code in contracts:
                     settle_date = get_settlement_date(code)
-                    if settle_date > today:  # 只保留未結算的合約
+                    # 🔥 改進:包含今天和未來的合約
+                    if settle_date >= today and settle_date != "9999/99/99":
                         contract_list.append({
                             'code': code,
                             'settle_date': settle_date,
@@ -327,12 +335,92 @@ def get_available_contracts():
                 # 按結算日期排序
                 contract_list.sort(key=lambda x: x['settle_date'])
                 
-                return contract_list, query_date
+                # 至少要有1個合約才返回
+                if len(contract_list) > 0:
+                    return contract_list, query_date
                 
         except Exception as e:
+            # 可以在這裡打印錯誤訊息幫助除錯
+            # print(f"Error on date {query_date}: {str(e)}")
             continue
     
     return None, None
+
+# 🔥 備用函式:使用原本的方式抓取數據
+@st.cache_data(ttl=300)
+def get_option_data_multi_days_backup(days=1):
+    """備用方法:抓取選擇權全市場數據"""
+    url = "https://www.taifex.com.tw/cht/3/optDailyMarketReport"
+    headers = {'User-Agent': 'Mozilla/5.0'}
+    all_data = []
+
+    for i in range(10):  # 回溯10天
+        target_date = datetime.now(tz=TW_TZ) - timedelta(days=i)
+        query_date = target_date.strftime('%Y/%m/%d')
+        payload = {
+            'queryType': '2',
+            'marketCode': '0',
+            'commodity_id': 'TXO',
+            'queryDate': query_date,
+            'MarketCode': '0',
+            'commodity_idt': 'TXO'
+        }
+        
+        try:
+            res = requests.post(url, data=payload, headers=headers, timeout=10, verify=False)
+            res.encoding = 'utf-8'
+            if "查無資料" in res.text or len(res.text) < 500:
+                continue
+            
+            dfs = pd.read_html(StringIO(res.text))
+            if not dfs:
+                continue
+            df = dfs[0]
+            
+            # 找欄位
+            col_map = {}
+            for col in df.columns:
+                col_str = str(col).strip()
+                if '未沖銷' in col_str and '契約量' in col_str:
+                    col_map['OI'] = col
+                elif any(k in col_str for k in ['到期月份', '週別', '契約', '月份']):
+                    if 'Month' not in col_map:
+                        col_map['Month'] = col
+                elif '履約價' in col_str:
+                    col_map['Strike'] = col
+                elif '買賣權' in col_str:
+                    col_map['Type'] = col
+                elif '結算價' in col_str:
+                    col_map['Price'] = col
+                elif '收盤價' in col_str and 'Price' not in col_map:
+                    col_map['Price'] = col
+            
+            # 如果 Month 還是沒找到,用第一個欄位
+            if 'Month' not in col_map and len(df.columns) > 0:
+                col_map['Month'] = df.columns[0]
+            
+            required = ['Month', 'Strike', 'Type', 'OI', 'Price']
+            if not all(k in col_map for k in required):
+                continue
+            
+            df_renamed = df.rename(columns={v: k for k, v in col_map.items()})
+            df_clean = df_renamed[required].dropna(subset=['Type'])
+            
+            # 資料清理
+            df_clean['Type'] = df_clean['Type'].astype(str).str.strip()
+            df_clean['Strike'] = pd.to_numeric(df_clean['Strike'].astype(str).str.replace(',', ''), errors='coerce')
+            df_clean['OI'] = pd.to_numeric(df_clean['OI'].astype(str).str.replace(',', ''), errors='coerce').fillna(0)
+            df_clean['Price'] = pd.to_numeric(df_clean['Price'].astype(str).str.replace(',', '').replace('-', '0'), errors='coerce').fillna(0)
+            df_clean['Amount'] = df_clean['OI'] * df_clean['Price'] * 50
+            
+            if df_clean['OI'].sum() > 0 and len(df_clean) > 10:
+                all_data.append({'date': query_date, 'df': df_clean})
+                if len(all_data) >= days:
+                    break
+        except:
+            continue
+    
+    return all_data if len(all_data) >= 1 else None
 
 # 🔥 修改後的 get_option_data_for_contract - 只抓特定合約
 @st.cache_data(ttl=300)
@@ -631,8 +719,41 @@ def main():
     with st.spinner("🔍 正在搜尋可用合約..."):
         contracts, fetch_date = get_available_contracts()
     
+    # 🔥 備用方案:如果主要方法失敗,使用舊方法
     if not contracts:
-        st.error("❌ 無法取得合約列表,請稍後再試")
+        st.warning("⚠️ 正在嘗試備用方法...")
+        with st.spinner("🔄 使用備用方法搜尋..."):
+            # 使用原本的函式先抓一次數據
+            temp_data = get_option_data_multi_days_backup(days=1)
+            if temp_data and len(temp_data) > 0:
+                df_temp = temp_data[0]['df']
+                fetch_date = temp_data[0]['date']
+                
+                # 從數據中提取合約列表
+                if 'Month' in df_temp.columns:
+                    unique_months = df_temp['Month'].dropna().unique()
+                    contracts = []
+                    today = datetime.now(tz=TW_TZ).strftime('%Y/%m/%d')
+                    
+                    for code in unique_months:
+                        code_str = str(code).strip().upper()
+                        if len(code_str) >= 6:
+                            settle_date = get_settlement_date(code_str)
+                            if settle_date >= today and settle_date != "9999/99/99":
+                                contracts.append({
+                                    'code': code_str,
+                                    'settle_date': settle_date,
+                                    'type': '週選' if 'W' in code_str or 'F' in code_str else '月選'
+                                })
+                    
+                    contracts.sort(key=lambda x: x['settle_date'])
+    
+    if not contracts:
+        st.error("❌ 無法取得合約列表,可能原因:")
+        st.error("1. 期交所網站維護中")
+        st.error("2. 目前非交易時間且無歷史數據")
+        st.error("3. 網路連線問題")
+        st.info("💡 建議: 請稍後再試,或檢查期交所網站是否正常")
         return
     
     # 建立選項列表
