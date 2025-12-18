@@ -263,146 +263,64 @@ def get_institutional_option_data():
     
     return None
 
-# 🔥 新增函式:快速抓取可用合約列表
+# 🔥🔥🔥 核心修正:選擇權數據抓取 - 使用原本驗證過的邏輯
 @st.cache_data(ttl=300)
-def get_available_contracts():
-    """快速抓取所有可用的選擇權合約代碼"""
-    url = "https://www.taifex.com.tw/cht/3/optDailyMarketReport"
-    headers = {'User-Agent': 'Mozilla/5.0'}
-    
-    for i in range(10):  # 回溯10天,提高成功率
-        target_date = datetime.now(tz=TW_TZ) - timedelta(days=i)
-        query_date = target_date.strftime('%Y/%m/%d')
-        payload = {
-            'queryType': '2',
-            'marketCode': '0',
-            'commodity_id': 'TXO',
-            'queryDate': query_date,
-            'MarketCode': '0',
-            'commodity_idt': 'TXO'
-        }
-        
-        try:
-            res = requests.post(url, data=payload, headers=headers, timeout=10, verify=False)
-            res.encoding = 'utf-8'
-            
-            if "查無資料" in res.text or len(res.text) < 500:
-                continue
-            
-            dfs = pd.read_html(StringIO(res.text))
-            if not dfs:
-                continue
-                
-            df = dfs[0]
-            
-            # 🔥 改進:找到月份/週別欄位 - 使用第一個欄位作為備選
-            month_col = None
-            for col in df.columns:
-                col_str = str(col).strip()
-                # 更寬鬆的條件
-                if any(keyword in col_str for keyword in ['到期月份', '週別', '契約', '月份']):
-                    month_col = col
-                    break
-            
-            # 如果都找不到,就用第一個欄位
-            if month_col is None and len(df.columns) > 0:
-                month_col = df.columns[0]
-            
-            if month_col is None:
-                continue
-            
-            # 提取所有合約代碼 - 更寬鬆的過濾
-            contracts = df[month_col].dropna().unique()
-            contracts = [str(c).strip().upper() for c in contracts 
-                        if len(str(c).strip()) >= 6 and 
-                        any(char.isdigit() for char in str(c))]  # 確保包含數字
-            
-            if contracts:
-                # 計算結算日期並排序
-                contract_list = []
-                today = datetime.now(tz=TW_TZ).strftime('%Y/%m/%d')
-                
-                for code in contracts:
-                    settle_date = get_settlement_date(code)
-                    # 🔥 改進:包含今天和未來的合約
-                    if settle_date >= today and settle_date != "9999/99/99":
-                        contract_list.append({
-                            'code': code,
-                            'settle_date': settle_date,
-                            'type': '週選' if 'W' in code or 'F' in code else '月選'
-                        })
-                
-                # 按結算日期排序
-                contract_list.sort(key=lambda x: x['settle_date'])
-                
-                # 至少要有1個合約才返回
-                if len(contract_list) > 0:
-                    return contract_list, query_date
-                
-        except Exception as e:
-            # 可以在這裡打印錯誤訊息幫助除錯
-            # print(f"Error on date {query_date}: {str(e)}")
-            continue
-    
-    return None, None
-
-# 🔥 備用函式:使用原本的方式抓取數據
-@st.cache_data(ttl=300)
-def get_option_data_multi_days_backup(days=1):
-    """備用方法:抓取選擇權全市場數據"""
+def get_option_data_multi_days(days=3):
+    """獲取選擇權全市場數據 (原始版本 - 已驗證可用)"""
     url = "https://www.taifex.com.tw/cht/3/optDailyMarketReport"
     headers = {'User-Agent': 'Mozilla/5.0'}
     all_data = []
 
-    for i in range(10):  # 回溯10天
+    for i in range(30):
         target_date = datetime.now(tz=TW_TZ) - timedelta(days=i)
         query_date = target_date.strftime('%Y/%m/%d')
-        payload = {
-            'queryType': '2',
-            'marketCode': '0',
-            'commodity_id': 'TXO',
-            'queryDate': query_date,
-            'MarketCode': '0',
-            'commodity_idt': 'TXO'
-        }
+        payload = {'queryType': '2', 'marketCode': '0', 'commodity_id': 'TXO', 'queryDate': query_date, 'MarketCode': '0', 'commodity_idt': 'TXO'}
         
         try:
             res = requests.post(url, data=payload, headers=headers, timeout=10, verify=False)
             res.encoding = 'utf-8'
-            if "查無資料" in res.text or len(res.text) < 500:
-                continue
+            if "查無資料" in res.text or len(res.text) < 500: continue
             
             dfs = pd.read_html(StringIO(res.text))
-            if not dfs:
-                continue
+            if not dfs: continue
             df = dfs[0]
             
-            # 找欄位
+            # 🔥 關鍵修正:精確欄位對應
             col_map = {}
+            
             for col in df.columns:
                 col_str = str(col).strip()
+                
+                # OI: 必須先檢查 (避免被Month誤判)
                 if '未沖銷' in col_str and '契約量' in col_str:
                     col_map['OI'] = col
-                elif any(k in col_str for k in ['到期月份', '週別', '契約', '月份']):
-                    if 'Month' not in col_map:
-                        col_map['Month'] = col
+                
+                # Month: 到期月份(週別) 或第一個包含"契約"的欄位
+                elif '到期月份' in col_str or '週別' in col_str:
+                    col_map['Month'] = col
+                elif col_str == '契約' and 'Month' not in col_map:
+                    col_map['Month'] = col
+                
+                # Strike: 履約價
                 elif '履約價' in col_str:
                     col_map['Strike'] = col
+                
+                # Type: 買賣權
                 elif '買賣權' in col_str:
                     col_map['Type'] = col
+                
+                # Price: 結算價優先,其次收盤價
                 elif '結算價' in col_str:
                     col_map['Price'] = col
                 elif '收盤價' in col_str and 'Price' not in col_map:
                     col_map['Price'] = col
             
-            # 如果 Month 還是沒找到,用第一個欄位
-            if 'Month' not in col_map and len(df.columns) > 0:
-                col_map['Month'] = df.columns[0]
-            
+            # 驗證是否找到所有必要欄位
             required = ['Month', 'Strike', 'Type', 'OI', 'Price']
             if not all(k in col_map for k in required):
                 continue
             
+            # 重新命名欄位
             df_renamed = df.rename(columns={v: k for k, v in col_map.items()})
             df_clean = df_renamed[required].dropna(subset=['Type'])
             
@@ -415,89 +333,7 @@ def get_option_data_multi_days_backup(days=1):
             
             if df_clean['OI'].sum() > 0 and len(df_clean) > 10:
                 all_data.append({'date': query_date, 'df': df_clean})
-                if len(all_data) >= days:
-                    break
-        except:
-            continue
-    
-    return all_data if len(all_data) >= 1 else None
-
-# 🔥 修改後的 get_option_data_for_contract - 只抓特定合約
-@st.cache_data(ttl=300)
-def get_option_data_for_contract(selected_contract, days=2):
-    """只抓取指定合約的選擇權數據"""
-    url = "https://www.taifex.com.tw/cht/3/optDailyMarketReport"
-    headers = {'User-Agent': 'Mozilla/5.0'}
-    all_data = []
-
-    for i in range(30):
-        target_date = datetime.now(tz=TW_TZ) - timedelta(days=i)
-        query_date = target_date.strftime('%Y/%m/%d')
-        payload = {
-            'queryType': '2',
-            'marketCode': '0',
-            'commodity_id': 'TXO',
-            'queryDate': query_date,
-            'MarketCode': '0',
-            'commodity_idt': 'TXO'
-        }
-        
-        try:
-            res = requests.post(url, data=payload, headers=headers, timeout=10, verify=False)
-            res.encoding = 'utf-8'
-            if "查無資料" in res.text or len(res.text) < 500:
-                continue
-            
-            dfs = pd.read_html(StringIO(res.text))
-            if not dfs:
-                continue
-            df = dfs[0]
-            
-            # 找到月份欄位
-            col_map = {}
-            for col in df.columns:
-                col_str = str(col).strip()
-                
-                if '未沖銷' in col_str and '契約量' in col_str:
-                    col_map['OI'] = col
-                elif '到期月份' in col_str or '週別' in col_str:
-                    col_map['Month'] = col
-                elif col_str == '契約' and 'Month' not in col_map:
-                    col_map['Month'] = col
-                elif '履約價' in col_str:
-                    col_map['Strike'] = col
-                elif '買賣權' in col_str:
-                    col_map['Type'] = col
-                elif '結算價' in col_str:
-                    col_map['Price'] = col
-                elif '收盤價' in col_str and 'Price' not in col_map:
-                    col_map['Price'] = col
-            
-            required = ['Month', 'Strike', 'Type', 'OI', 'Price']
-            if not all(k in col_map for k in required):
-                continue
-            
-            # 🔥 只保留指定合約的數據
-            df_renamed = df.rename(columns={v: k for k, v in col_map.items()})
-            df_filtered = df_renamed[df_renamed['Month'] == selected_contract].copy()
-            
-            if df_filtered.empty:
-                continue
-            
-            df_clean = df_filtered[required].dropna(subset=['Type'])
-            
-            # 資料清理
-            df_clean['Type'] = df_clean['Type'].astype(str).str.strip()
-            df_clean['Strike'] = pd.to_numeric(df_clean['Strike'].astype(str).str.replace(',', ''), errors='coerce')
-            df_clean['OI'] = pd.to_numeric(df_clean['OI'].astype(str).str.replace(',', ''), errors='coerce').fillna(0)
-            df_clean['Price'] = pd.to_numeric(df_clean['Price'].astype(str).str.replace(',', '').replace('-', '0'), errors='coerce').fillna(0)
-            df_clean['Amount'] = df_clean['OI'] * df_clean['Price'] * 50
-            
-            if df_clean['OI'].sum() > 0 and len(df_clean) > 10:
-                all_data.append({'date': query_date, 'df': df_clean})
-                if len(all_data) >= days:
-                    break
-                    
+                if len(all_data) >= days: break
         except Exception as e:
             continue
             
@@ -700,6 +536,16 @@ def ask_chatgpt(prompt):
         return res.choices[0].message.content
     except Exception as e: return str(e)
 
+def get_next_contracts(df, data_date):
+    """從數據中提取未結算的合約"""
+    unique_codes = sorted(df['Month'].unique())
+    targets = []
+    for code in unique_codes:
+        s_date = get_settlement_date(code)
+        if s_date >= data_date:  # 包含今天
+            targets.append({'code': code, 'date': s_date})
+    return targets
+
 # 主程式
 def main():
     if 'analysis_unlocked' not in st.session_state: 
@@ -708,68 +554,89 @@ def main():
         st.session_state.show_analysis_results = False
     if 'selected_contract' not in st.session_state:
         st.session_state.selected_contract = None
+    if 'all_contracts' not in st.session_state:
+        st.session_state.all_contracts = None
     
     inject_adsense_head()
     
     st.title("🧛‍♂️ 台指期籌碼戰情室 (莊家控盤版)")
     
-    # 🔥 步驟1: 先抓取可用合約列表
-    st.markdown("### 📋 步驟 1: 選擇要分析的合約")
+    # 側邊欄設定
+    if st.sidebar.button("🔄 重新整理"):
+        st.cache_data.clear()
+        st.session_state.show_analysis_results = False
+        st.session_state.selected_contract = None
+        st.session_state.all_contracts = None
+        st.rerun()
     
-    with st.spinner("🔍 正在搜尋可用合約..."):
-        contracts, fetch_date = get_available_contracts()
+    st.sidebar.caption(f"Gemini: {'✅' if gemini_model else '❌'} | ChatGPT: {'✅' if openai_client else '❌'}")
     
-    # 🔥 備用方案:如果主要方法失敗,使用舊方法
-    if not contracts:
-        st.warning("⚠️ 正在嘗試備用方法...")
-        with st.spinner("🔄 使用備用方法搜尋..."):
-            # 使用原本的函式先抓一次數據
-            temp_data = get_option_data_multi_days_backup(days=1)
-            if temp_data and len(temp_data) > 0:
-                df_temp = temp_data[0]['df']
-                fetch_date = temp_data[0]['date']
-                
-                # 從數據中提取合約列表
-                if 'Month' in df_temp.columns:
-                    unique_months = df_temp['Month'].dropna().unique()
-                    contracts = []
-                    today = datetime.now(tz=TW_TZ).strftime('%Y/%m/%d')
-                    
-                    for code in unique_months:
-                        code_str = str(code).strip().upper()
-                        if len(code_str) >= 6:
-                            settle_date = get_settlement_date(code_str)
-                            if settle_date >= today and settle_date != "9999/99/99":
-                                contracts.append({
-                                    'code': code_str,
-                                    'settle_date': settle_date,
-                                    'type': '週選' if 'W' in code_str or 'F' in code_str else '月選'
-                                })
-                    
-                    contracts.sort(key=lambda x: x['settle_date'])
-    
-    if not contracts:
-        st.error("❌ 無法取得合約列表,可能原因:")
-        st.error("1. 期交所網站維護中")
-        st.error("2. 目前非交易時間且無歷史數據")
-        st.error("3. 網路連線問題")
-        st.info("💡 建議: 請稍後再試,或檢查期交所網站是否正常")
-        return
-    
-    # 建立選項列表
-    contract_options = []
-    for c in contracts:
-        label = f"{c['code']} ({c['type']}) - 結算日: {c['settle_date']}"
-        contract_options.append((label, c['code'], c['settle_date']))
-    
-    # 讓使用者選擇合約
-    selected_label = st.selectbox(
-        "選擇要分析的合約",
-        options=[opt[0] for opt in contract_options],
-        help=f"數據日期: {fetch_date}"
+    # 手動輸入現貨點數
+    st.sidebar.markdown("---")
+    st.sidebar.markdown("### 📊 手動設定現貨")
+    manual_spot = st.sidebar.number_input(
+        "輸入當前大盤點數 (選填)",
+        min_value=0,
+        max_value=30000,
+        value=0,
+        step=10,
+        help="若自動抓取有延遲或收盤後,可手動輸入。輸入 0 則使用自動抓取值"
     )
     
-    # 找到對應的合約代碼和結算日
+    # 🔥 步驟1: 抓取數據並提取合約列表
+    if st.session_state.all_contracts is None:
+        st.markdown("### 📋 步驟 1: 載入選擇權數據")
+        
+        with st.spinner("🔄 正在載入數據..."):
+            all_option_data = get_option_data_multi_days(days=2)
+        
+        if not all_option_data:
+            st.error("❌ 無法取得選擇權數據")
+            st.info("可能原因: 非交易時間、期交所維護、或網路問題")
+            return
+        
+        # 從數據中提取合約列表
+        df_temp = all_option_data[0]['df']
+        data_date = all_option_data[0]['date']
+        
+        if 'Month' not in df_temp.columns:
+            st.error("❌ 數據格式錯誤")
+            return
+        
+        # 提取所有合約
+        all_contracts = get_next_contracts(df_temp, data_date)
+        
+        if not all_contracts:
+            st.error("❌ 找不到未結算的合約")
+            return
+        
+        # 儲存到 session_state
+        st.session_state.all_contracts = all_contracts
+        st.session_state.all_option_data = all_option_data
+        st.session_state.data_date = data_date
+        st.rerun()
+    
+    # 🔥 步驟2: 選擇合約
+    all_contracts = st.session_state.all_contracts
+    data_date = st.session_state.data_date
+    
+    st.markdown("### 📋 選擇要分析的合約")
+    st.caption(f"數據日期: {data_date}")
+    
+    # 建立選項
+    contract_options = []
+    for c in all_contracts:
+        contract_type = '週選' if 'W' in c['code'] or 'F' in c['code'] else '月選'
+        label = f"{c['code']} ({contract_type}) - 結算日: {c['date']}"
+        contract_options.append((label, c['code'], c['date']))
+    
+    selected_label = st.selectbox(
+        "請選擇合約",
+        options=[opt[0] for opt in contract_options],
+        index=0
+    )
+    
+    # 找到對應的合約資訊
     selected_info = next((opt for opt in contract_options if opt[0] == selected_label), None)
     
     if not selected_info:
@@ -779,57 +646,34 @@ def main():
     selected_code = selected_info[1]
     settlement_date = selected_info[2]
     
-    # 顯示已選擇的合約資訊
     st.info(f"✅ 已選擇: **{selected_code}** (結算日: {settlement_date})")
     
-    # 🔥 步驟2: 開始分析按鈕
-    st.markdown("### 🚀 步驟 2: 開始分析")
+    # 🔥 步驟3: 開始分析
+    st.markdown("---")
+    st.markdown("### 🚀 開始分析")
     
-    if st.button("🔍 開始分析此合約", type="primary", use_container_width=True):
+    if st.button("🔍 分析此合約", type="primary", use_container_width=True):
         st.session_state.selected_contract = selected_code
         st.session_state.settlement_date = settlement_date
         st.rerun()
     
-    # 🔥 如果已經選擇合約,才開始抓取數據
+    # 🔥 如果已選擇合約,顯示分析結果
     if st.session_state.selected_contract:
         selected_code = st.session_state.selected_contract
         settlement_date = st.session_state.settlement_date
+        all_option_data = st.session_state.all_option_data
         
         st.markdown("---")
-        st.markdown(f"## 📊 正在分析: {selected_code}")
+        st.markdown(f"## 📊 分析報告: {selected_code}")
         
-        # 側邊欄設定
-        if st.sidebar.button("🔄 重新整理"):
-            st.cache_data.clear()
-            st.session_state.show_analysis_results = False
-            st.session_state.selected_contract = None
-            st.rerun()
-        
-        st.sidebar.caption(f"Gemini: {'✅' if gemini_model else '❌'} | ChatGPT: {'✅' if openai_client else '❌'}")
-        
-        # 手動輸入現貨點數
-        st.sidebar.markdown("---")
-        st.sidebar.markdown("### 📊 手動設定現貨")
-        manual_spot = st.sidebar.number_input(
-            "輸入當前大盤點數 (選填)",
-            min_value=0,
-            max_value=30000,
-            value=0,
-            step=10,
-            help="若自動抓取有延遲或收盤後,可手動輸入。輸入 0 則使用自動抓取值"
-        )
-        
-        # 抓取數據
-        with st.spinner("🔄 正在搜尋最新數據..."):
+        # 抓取其他數據
+        with st.spinner("🔄 正在更新數據..."):
             taiex_now = get_realtime_data()
             futures_price, futures_volume, fut_date = get_futures_data()
             inst_fut_position = get_institutional_futures_position()
             inst_opt_data = get_institutional_option_data()
-            
-            # 🔥 只抓取選定合約的數據
-            all_option_data = get_option_data_for_contract(selected_code, days=2)
         
-        # 處理手動輸入的現貨價格
+        # 處理手動輸入
         if manual_spot > 0:
             taiex_now = manual_spot
             st.sidebar.success(f"✅ 使用手動輸入: {int(manual_spot)} 點")
@@ -838,16 +682,21 @@ def main():
         else:
             st.sidebar.warning("⚠️ 無法取得現貨價格,請手動輸入")
         
-        if not all_option_data:
-            st.error(f"❌ 無法抓取 {selected_code} 的選擇權數據")
+        # 過濾選定合約的數據
+        df_full = calculate_multi_day_oi_change(all_option_data)
+        df_selected = df_full[df_full['Month'] == selected_code].copy()
+        
+        if df_selected.empty:
+            st.error(f"❌ 找不到 {selected_code} 的數據")
             return
         
-        # 數據處理
-        df_full = calculate_multi_day_oi_change(all_option_data)
-        data_date = all_option_data[0]['date']
         basis = (futures_price - taiex_now) if (taiex_now and futures_price) else None
         
-        st.sidebar.download_button("📥 下載數據", df_full.to_csv(index=False).encode('utf-8-sig'), f"{selected_code}_data.csv")
+        st.sidebar.download_button(
+            "📥 下載數據", 
+            df_selected.to_csv(index=False).encode('utf-8-sig'), 
+            f"{selected_code}_data.csv"
+        )
         
         # === 儀表板 ===
         c1, c2, c3, c4, c5 = st.columns(5)
@@ -865,10 +714,10 @@ def main():
         c3.metric(f"台指期 ({fut_date[5:]})", f"{int(futures_price) if futures_price else 'N/A'}")
         c4.metric("基差", f"{basis:.0f}" if basis else "N/A", delta_color="normal" if basis and basis > 0 else "inverse")
         
-        call_amt = df_full[df_full['Type'].str.contains('Call|買')]['Amount'].sum()
-        put_amt = df_full[df_full['Type'].str.contains('Put|賣')]['Amount'].sum()
+        call_amt = df_selected[df_selected['Type'].str.contains('Call|買')]['Amount'].sum()
+        put_amt = df_selected[df_selected['Type'].str.contains('Put|賣')]['Amount'].sum()
         pc_ratio = (put_amt / call_amt * 100) if call_amt > 0 else 0
-        c5.metric(f"P/C 金額比 ({data_date[5:]})", f"{pc_ratio:.1f}%", "偏多" if pc_ratio > 100 else "偏空")
+        c5.metric(f"P/C 金額比", f"{pc_ratio:.1f}%", "偏多" if pc_ratio > 100 else "偏空")
         
         st.markdown("---")
         
@@ -940,20 +789,19 @@ def main():
         
         st.markdown("---")
         
-        # === 選擇權 OI 龍捲風圖 ===
+        # === 龍捲風圖 ===
         st.markdown(f"### 📊 {selected_code} 未平倉分佈 (結算: {settlement_date})")
         
-        if not df_full.empty:
-            fig = plot_tornado_chart(df_full, f"{selected_code} 合約", taiex_now)
-            st.plotly_chart(fig, use_container_width=True)
-            
-            # GEX 分析
-            gex_data = calculate_dealer_gex(df_full, taiex_now, settlement_date)
-            if gex_data is not None:
-                st.markdown("#### Dealer Gamma Exposure (GEX)")
-                fig_gex = plot_gex_chart(gex_data, taiex_now)
-                if fig_gex:
-                    st.plotly_chart(fig_gex, use_container_width=True)
+        fig = plot_tornado_chart(df_selected, f"{selected_code} 合約", taiex_now)
+        st.plotly_chart(fig, use_container_width=True)
+        
+        # GEX 分析
+        gex_data = calculate_dealer_gex(df_selected, taiex_now, settlement_date)
+        if gex_data is not None:
+            st.markdown("#### Dealer Gamma Exposure (GEX)")
+            fig_gex = plot_gex_chart(gex_data, taiex_now)
+            if fig_gex:
+                st.plotly_chart(fig_gex, use_container_width=True)
         
         st.markdown("---")
         
@@ -976,11 +824,11 @@ def main():
                     st.session_state.ai_provider = 'chatgpt'
             
             if st.session_state.show_analysis_results:
-                atm_iv, risk_reversal, atm_strike = calculate_risk_reversal(df_full, taiex_now, settlement_date)
-                gex_summary = calculate_dealer_gex(df_full, taiex_now, settlement_date)
+                atm_iv, risk_reversal, atm_strike = calculate_risk_reversal(df_selected, taiex_now, settlement_date)
+                gex_summary = calculate_dealer_gex(df_selected, taiex_now, settlement_date)
                 
                 ai_data = prepare_ai_data(
-                    df_full, inst_opt_data, inst_fut_position, 
+                    df_selected, inst_opt_data, inst_fut_position, 
                     futures_price, taiex_now, basis, 
                     atm_iv, risk_reversal, gex_summary, data_date
                 )
@@ -999,8 +847,6 @@ def main():
         # 廣告區
         st.markdown("---")
         show_ad_placeholder()
-    else:
-        st.info("👆 請先選擇要分析的合約,然後點擊「開始分析」按鈕")
 
 if __name__ == "__main__":
     main()
