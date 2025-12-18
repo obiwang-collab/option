@@ -509,7 +509,18 @@ def plot_gex_chart(gex_df, spot_price):
     colors = ['green' if x > 0 else 'red' for x in gex_df['GEX']]
     fig.add_trace(go.Bar(x=gex_df['Strike'], y=gex_df['GEX'], marker_color=colors, name='GEX'))
     if spot_price: fig.add_vline(x=spot_price, line_dash="dash", line_color="orange")
-    fig.update_layout(title="Dealer Gamma Exposure (GEX)", xaxis_title="履約價", yaxis_title="GEX", height=400, showlegend=False)
+    # 🔥 X軸格式化: 完整數字 + 千分位逗號
+    fig.update_layout(
+        title="Dealer Gamma Exposure (GEX)", 
+        xaxis_title="履約價", 
+        yaxis_title="GEX", 
+        xaxis=dict(
+            tickformat=",",  # 加上千分位逗號
+            separatethousands=True  # 啟用千分位分隔
+        ),
+        height=400, 
+        showlegend=False
+    )
     return fig
 
 # AI 相關函數
