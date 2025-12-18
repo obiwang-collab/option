@@ -430,6 +430,10 @@ def plot_tornado_chart(df_target, title_text, spot_price):
     df_put = df_target[~is_call][['Strike', 'OI', 'Amount']].rename(columns={'OI': 'Put_OI', 'Amount': 'Put_Amt'})
     data = pd.merge(df_call, df_put, on='Strike', how='outer').fillna(0).sort_values('Strike')
     
+    # 🔥 計算總金額
+    total_call_amt = data['Call_Amt'].sum()
+    total_put_amt = data['Put_Amt'].sum()
+    
     FOCUS_RANGE = 1200
     center_price = spot_price if (spot_price and spot_price > 0) else data['Strike'].median()
     if center_price > 0:
@@ -452,9 +456,40 @@ def plot_tornado_chart(df_target, title_text, spot_price):
     fig = go.Figure()
     fig.add_trace(go.Bar(y=data['Strike'], x=-data['Put_OI'], orientation='h', name='Put (支撐)', marker_color='#2ca02c', opacity=0.85, text=data['Put_Text'], textposition='outside', hovertemplate='Put OI: %{x}<br>Amt: %{customdata:.2f}億', customdata=data['Put_Amt']/1e8))
     fig.add_trace(go.Bar(y=data['Strike'], x=data['Call_OI'], orientation='h', name='Call (壓力)', marker_color='#d62728', opacity=0.85, text=data['Call_Text'], textposition='outside', hovertemplate='Call OI: %{x}<br>Amt: %{customdata:.2f}億', customdata=data['Call_Amt']/1e8))
+    
     if spot_price:
         fig.add_hline(y=spot_price, line_dash="dash", line_color="#ff7f0e", line_width=2)
         fig.add_annotation(x=1.05, y=spot_price, text=f"現貨 {int(spot_price)}", showarrow=False, bgcolor="#ff7f0e", font=dict(color="white"))
+    
+    # 🔥 在圖表兩側加上總金額標註
+    # Put 總金額 (左側)
+    fig.add_annotation(
+        x=-x_limit * 0.95,
+        y=data['Strike'].max() if not data.empty else 0,
+        text=f"<b>Put 總金額</b><br>{total_put_amt/1e8:.1f} 億",
+        showarrow=False,
+        bgcolor="#2ca02c",
+        font=dict(color="white", size=14),
+        bordercolor="white",
+        borderwidth=2,
+        xanchor="left",
+        yanchor="top"
+    )
+    
+    # Call 總金額 (右側)
+    fig.add_annotation(
+        x=x_limit * 0.95,
+        y=data['Strike'].max() if not data.empty else 0,
+        text=f"<b>Call 總金額</b><br>{total_call_amt/1e8:.1f} 億",
+        showarrow=False,
+        bgcolor="#d62728",
+        font=dict(color="white", size=14),
+        bordercolor="white",
+        borderwidth=2,
+        xanchor="right",
+        yanchor="top"
+    )
+    
     fig.update_layout(title=dict(text=title_text, x=0.5), xaxis=dict(range=[-x_limit, x_limit]), barmode='overlay', height=750)
     return fig
 
