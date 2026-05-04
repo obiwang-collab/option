@@ -633,7 +633,7 @@ def main():
     manual_spot = st.sidebar.number_input(
         "輸入當前大盤點數 (選填)",
         min_value=0,
-        max_value=30000,
+        max_value=60000,
         value=0,
         step=10,
         help="若自動抓取有延遲或收盤後,可手動輸入。輸入 0 則使用自動抓取值"
