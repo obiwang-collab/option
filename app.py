@@ -34,7 +34,7 @@ def get_gemini_model(api_key):
     try:
         available_models = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
         target_model_name = None
-        priority_targets = ['gemini-1.5-flash', 'gemini-1.5-pro', 'gemini-pro', 'flash']
+        priority_targets = ['gemini-1.5-flash']
         for target in priority_targets:
             for model_id in available_models:
                 if target in model_id.lower():
