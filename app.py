@@ -747,7 +747,7 @@ def main():
             return
         
         basis = (futures_price - taiex_now) if (taiex_now and futures_price) else None
-        
+        download_date = datetime.now(tz=TW_TZ).strftime('%Y%m%d')
         st.sidebar.download_button(
             "📥 下載數據", 
             df_selected.to_csv(index=False).encode('utf-8-sig'), 
