@@ -751,7 +751,7 @@ def main():
         st.sidebar.download_button(
             "📥 下載數據", 
             df_selected.to_csv(index=False).encode('utf-8-sig'), 
-            f"{selected_code}_data.csv"
+            f"option-{download_date}.csv"
         )
         
         # === 儀表板 ===
